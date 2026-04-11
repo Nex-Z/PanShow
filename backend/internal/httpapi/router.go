@@ -24,6 +24,8 @@ const userContextKey = "panshow_user"
 const tokenContextKey = "panshow_session_token"
 const accessTokenHeader = "X-PanShow-Access-Token"
 const announcementCacheTTL = 5 * time.Minute
+const loginFailureLimit = 8
+const loginFailureWindow = 10 * time.Minute
 
 type RouterDeps struct {
 	Config  config.Config
@@ -117,6 +119,7 @@ func NewRouter(deps RouterDeps) *gin.Engine {
 	admin.GET("/directory-passwords", api.listDirectoryPasswords)
 	admin.POST("/directory-passwords", api.createDirectoryPassword)
 	admin.PATCH("/directory-passwords/:id", api.updateDirectoryPassword)
+	admin.PATCH("/directory-passwords/:id/password", api.updateDirectoryPasswordSecret)
 	admin.DELETE("/directory-passwords/:id", api.disableDirectoryPassword)
 	admin.GET("/announcements", api.listAnnouncements)
 	admin.POST("/announcements", api.createAnnouncement)
@@ -139,14 +142,27 @@ func (api *API) login(c *gin.Context) {
 	if !bindJSON(c, &req) {
 		return
 	}
+	req.Username = strings.TrimSpace(req.Username)
+	if api.loginRateLimited(c, req.Username) {
+		return
+	}
 
 	var user model.User
 	if err := api.db.Where("username = ?", req.Username).First(&user).Error; err != nil {
+		if !api.recordLoginFailure(c, req.Username) {
+			return
+		}
 		writeError(c, http.StatusUnauthorized, "invalid_credentials", "用户名或密码错误")
 		return
 	}
 	if !user.Active || bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password)) != nil {
+		if !api.recordLoginFailure(c, req.Username) {
+			return
+		}
 		writeError(c, http.StatusUnauthorized, "invalid_credentials", "用户名或密码错误")
+		return
+	}
+	if !api.clearLoginFailures(c, req.Username) {
 		return
 	}
 
@@ -651,6 +667,49 @@ func (api *API) updateDirectoryPassword(c *gin.Context) {
 	if !api.invalidateDirectoryAccess(c) {
 		return
 	}
+	if err := api.db.First(&rule, id).Error; err != nil {
+		writeError(c, http.StatusInternalServerError, "database_error", "读取目录密码失败")
+		return
+	}
+	writeJSON(c, http.StatusOK, gin.H{"directoryPassword": rule})
+}
+
+func (api *API) updateDirectoryPasswordSecret(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	var req struct {
+		Password string `json:"password" binding:"required"`
+	}
+	if !bindJSON(c, &req) {
+		return
+	}
+
+	var rule model.DirectoryPassword
+	if err := api.db.First(&rule, id).Error; err != nil {
+		writeError(c, http.StatusNotFound, "not_found", "目录密码不存在")
+		return
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "hash_error", "生成密码哈希失败")
+		return
+	}
+	if err := api.db.Model(&rule).Updates(map[string]any{
+		"password_hash": string(hash),
+		"version":       rule.Version + 1,
+	}).Error; err != nil {
+		writeError(c, http.StatusBadRequest, "database_error", "更新目录密码失败")
+		return
+	}
+	if !api.invalidateDirectoryAccess(c) {
+		return
+	}
+	if err := api.db.First(&rule, id).Error; err != nil {
+		writeError(c, http.StatusInternalServerError, "database_error", "读取目录密码失败")
+		return
+	}
 	writeJSON(c, http.StatusOK, gin.H{"directoryPassword": rule})
 }
 
@@ -749,6 +808,63 @@ func (api *API) adminRequired() gin.HandlerFunc {
 		}
 		c.Next()
 	}
+}
+
+func (api *API) loginRateLimited(c *gin.Context, username string) bool {
+	for _, scope := range api.loginFailureScopes(c, username) {
+		count, err := api.session.LoginFailureCount(c.Request.Context(), scope[0], scope[1])
+		if err != nil {
+			writeError(c, http.StatusInternalServerError, "login_limiter_error", "读取登录限流状态失败")
+			return true
+		}
+		if count >= loginFailureLimit {
+			c.Header("Retry-After", strconv.Itoa(int(loginFailureWindow.Seconds())))
+			writeError(c, http.StatusTooManyRequests, "too_many_login_attempts", "登录失败次数过多，请稍后再试")
+			return true
+		}
+	}
+	return false
+}
+
+func (api *API) recordLoginFailure(c *gin.Context, username string) bool {
+	for _, scope := range api.loginFailureScopes(c, username) {
+		if err := api.session.RecordLoginFailure(c.Request.Context(), scope[0], scope[1], loginFailureWindow); err != nil {
+			writeError(c, http.StatusInternalServerError, "login_limiter_error", "记录登录限流状态失败")
+			return false
+		}
+	}
+	return true
+}
+
+func (api *API) clearLoginFailures(c *gin.Context, username string) bool {
+	if err := api.session.ClearLoginFailures(c.Request.Context(), api.loginUsernameFailureScope(username)); err != nil {
+		writeError(c, http.StatusInternalServerError, "login_limiter_error", "清理登录限流状态失败")
+		return false
+	}
+	return true
+}
+
+func (api *API) loginFailureScopes(c *gin.Context, username string) [][2]string {
+	ip := c.ClientIP()
+	if ip == "" {
+		ip = "unknown"
+	}
+	username = strings.ToLower(strings.TrimSpace(username))
+	if username == "" {
+		username = "empty"
+	}
+	return [][2]string{
+		{"ip", ip},
+		api.loginUsernameFailureScope(username),
+	}
+}
+
+func (api *API) loginUsernameFailureScope(username string) [2]string {
+	username = strings.ToLower(strings.TrimSpace(username))
+	if username == "" {
+		username = "empty"
+	}
+	return [2]string{"username", username}
 }
 
 func (api *API) ensureDirectoryAccess(c *gin.Context, dir string) bool {

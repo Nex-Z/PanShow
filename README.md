@@ -60,6 +60,26 @@ http://127.0.0.1:5173
 
 后端会用 Redis 缓存 R2 目录列表、文件详情和当前版本的启用公告列表，R2 缓存默认 1800 秒，可通过 `PANSHOW_R2_CACHE_TTL_SECONDS` 调整。列表页的“刷新”按钮会强制清理当前路径及其子级文件缓存，再重新读取；公告在管理员后台发布、修改、停启或手动刷新后会立即切换到新版本缓存。
 
+\# 外部接口：修改目录密码
+
+外部程序可以复用后台登录接口获取管理员 token，再调用专用接口按目录密码 ID 修改明文密码。登录失败会按用户名和客户端 IP 写入 Redis 限流，10 分钟内任一维度失败 8 次后返回 `429 too_many_login_attempts`。
+
+登录获取 token：
+
+```powershell
+$login = Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8080/api/auth/login -ContentType 'application/json' -Body '{"username":"admin","password":"admin-password"}'
+$token = $login.token
+```
+
+按目录密码 ID 修改密码：
+
+```powershell
+$body = '{"password":"new-directory-password"}'
+Invoke-RestMethod -Method Patch -Uri http://127.0.0.1:8080/api/admin/directory-passwords/1/password -Headers @{ Authorization = "Bearer $token" } -ContentType 'application/json' -Body $body
+```
+
+接口要求调用者是管理员；服务端只保存 bcrypt 哈希，成功后会递增该目录密码的版本并刷新目录鉴权缓存，让旧目录密码通过状态失效。生产环境务必走 HTTPS，避免明文密码在链路或日志里泄漏。
+
 \# 构建命令
 
 后端测试：

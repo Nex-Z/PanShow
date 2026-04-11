@@ -116,6 +116,36 @@ func (s *Store) BumpAnnouncementVersion(ctx context.Context) error {
 	return s.client.Incr(ctx, announcementVersionKey).Err()
 }
 
+func (s *Store) LoginFailureCount(ctx context.Context, scope, value string) (int64, error) {
+	count, err := s.client.Get(ctx, loginFailureKey(scope, value)).Int64()
+	if err == redis.Nil {
+		return 0, nil
+	}
+	return count, err
+}
+
+func (s *Store) RecordLoginFailure(ctx context.Context, scope, value string, ttl time.Duration) error {
+	count, err := s.client.Incr(ctx, loginFailureKey(scope, value)).Result()
+	if err != nil {
+		return err
+	}
+	if count == 1 {
+		return s.client.Expire(ctx, loginFailureKey(scope, value), ttl).Err()
+	}
+	return nil
+}
+
+func (s *Store) ClearLoginFailures(ctx context.Context, scopes ...[2]string) error {
+	if len(scopes) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(scopes))
+	for _, scope := range scopes {
+		keys = append(keys, loginFailureKey(scope[0], scope[1]))
+	}
+	return s.client.Del(ctx, keys...).Err()
+}
+
 func (s *Store) MarkPasswordPassed(ctx context.Context, token, dir string, version uint) error {
 	return s.client.Set(ctx, accessKey(token, dir, version), "1", s.ttl).Err()
 }
@@ -215,6 +245,11 @@ func accessSessionKey(token string) string {
 func accessKey(token, dir string, version uint) string {
 	encoded := base64.RawURLEncoding.EncodeToString([]byte(dir))
 	return fmt.Sprintf("panshow:access:%s:%s:%d", token, encoded, version)
+}
+
+func loginFailureKey(scope, value string) string {
+	encoded := base64.RawURLEncoding.EncodeToString([]byte(value))
+	return fmt.Sprintf("panshow:login-fail:%s:%s", scope, encoded)
 }
 
 func cacheKey(key string) string {
