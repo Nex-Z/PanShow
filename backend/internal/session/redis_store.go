@@ -13,13 +13,19 @@ import (
 )
 
 const (
-	authCookieName   = "panshow_auth"
-	accessCookieName = "panshow_access"
+	authCookieName            = "panshow_auth"
+	accessCookieName          = "panshow_access"
+	directoryAccessVersionKey = "panshow:directory-access:version"
 )
 
 type Store struct {
 	client *redis.Client
 	ttl    time.Duration
+}
+
+type PasswordAccessCheck struct {
+	Dir     string
+	Version uint
 }
 
 func NewRedisStore(client *redis.Client, ttl time.Duration) *Store {
@@ -85,19 +91,54 @@ func (s *Store) Ping(ctx context.Context) error {
 	return s.client.Ping(ctx).Err()
 }
 
+func (s *Store) DirectoryAccessVersion(ctx context.Context) (int64, error) {
+	version, err := s.client.Get(ctx, directoryAccessVersionKey).Int64()
+	if err == redis.Nil {
+		return 0, nil
+	}
+	return version, err
+}
+
+func (s *Store) BumpDirectoryAccessVersion(ctx context.Context) error {
+	return s.client.Incr(ctx, directoryAccessVersionKey).Err()
+}
+
 func (s *Store) MarkPasswordPassed(ctx context.Context, token, dir string, version uint) error {
 	return s.client.Set(ctx, accessKey(token, dir, version), "1", s.ttl).Err()
 }
 
 func (s *Store) HasPasswordPassed(ctx context.Context, token, dir string, version uint) (bool, error) {
-	value, err := s.client.Get(ctx, accessKey(token, dir, version)).Result()
-	if err == redis.Nil {
-		return false, nil
-	}
+	passed, err := s.HasPasswordsPassed(ctx, token, []PasswordAccessCheck{{Dir: dir, Version: version}})
 	if err != nil {
 		return false, err
 	}
-	return value == "1", nil
+	return len(passed) > 0 && passed[0], nil
+}
+
+func (s *Store) HasPasswordsPassed(ctx context.Context, token string, checks []PasswordAccessCheck) ([]bool, error) {
+	passed := make([]bool, len(checks))
+	if len(checks) == 0 || token == "" {
+		return passed, nil
+	}
+
+	keys := make([]string, len(checks))
+	for i, check := range checks {
+		keys[i] = accessKey(token, check.Dir, check.Version)
+	}
+
+	values, err := s.client.MGet(ctx, keys...).Result()
+	if err != nil {
+		return nil, err
+	}
+	for i, value := range values {
+		switch typed := value.(type) {
+		case string:
+			passed[i] = typed == "1"
+		case []byte:
+			passed[i] = string(typed) == "1"
+		}
+	}
+	return passed, nil
 }
 
 func (s *Store) GetJSON(ctx context.Context, key string, dest any) (bool, error) {

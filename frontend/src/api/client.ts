@@ -66,7 +66,10 @@ export const api = {
     }
   },
   me: () => request<{ user: User }>("/api/auth/me"),
-  listFiles: (path: string) => request<{ path: string; entries: FileEntry[] }>(`/api/files?path=${queryPath(path)}`),
+  listFiles: (path: string, includeReadme = false) =>
+    request<{ path: string; entries: FileEntry[]; readme?: string }>(
+      `/api/files?path=${queryPath(path)}${includeReadme ? "&includeReadme=true" : ""}`
+    ),
   fileDetail: (path: string) => request<{ file: FileEntry }>(`/api/files/detail?path=${queryPath(path)}`),
   readme: (path: string) => request<{ path: string; content: string }>(`/api/readme?path=${queryPath(path)}`),
   download: (path: string) => request<{ url: string; expiresIn: number }>(`/api/files/download?path=${queryPath(path)}`),

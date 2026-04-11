@@ -51,7 +51,7 @@ func Load() Config {
 		R2Bucket:       env("PANSHOW_R2_BUCKET", ""),
 		R2Region:       env("PANSHOW_R2_REGION", "auto"),
 		R2RootPrefix:   env("PANSHOW_R2_ROOT_PREFIX", ""),
-		R2CacheTTL:     time.Duration(envInt("PANSHOW_R2_CACHE_TTL_SECONDS", 60)) * time.Second,
+		R2CacheTTL:     time.Duration(envInt("PANSHOW_R2_CACHE_TTL_SECONDS", 60*30)) * time.Second,
 		AdminUsername:  env("PANSHOW_ADMIN_USERNAME", ""),
 		AdminPassword:  env("PANSHOW_ADMIN_PASSWORD", ""),
 	}

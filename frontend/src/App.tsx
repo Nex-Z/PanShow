@@ -151,10 +151,9 @@ function FileBrowser() {
         setReadme("");
         return;
       }
-      const files = await api.listFiles(nextRoute.path);
+      const files = await api.listFiles(nextRoute.path, true);
       setEntries(files.entries);
-      const readme = await api.readme(nextRoute.path).catch(() => ({ content: "" }));
-      setReadme(readme.content);
+      setReadme(files.readme ?? "");
     } catch (err) {
       if (err instanceof RequestError && err.error.code === "directory_password_required") {
         setRequiredPaths(err.error.requiredPaths ?? []);

@@ -19,9 +19,9 @@ type User struct {
 
 type DirectoryPassword struct {
 	ID           uint      `gorm:"primaryKey" json:"id"`
-	Path         string    `gorm:"size:1024;uniqueIndex;not null" json:"path"`
+	Path         string    `gorm:"size:1024;uniqueIndex;index:idx_enabled_path,sort:asc;not null" json:"path"`
 	PasswordHash string    `gorm:"size:255;not null" json:"-"`
-	Enabled      bool      `gorm:"not null;default:true;index" json:"enabled"`
+	Enabled      bool      `gorm:"not null;default:true;index:idx_enabled_path,sort:asc" json:"enabled"`
 	Version      uint      `gorm:"not null;default:1" json:"version"`
 	CreatedAt    time.Time `json:"createdAt"`
 	UpdatedAt    time.Time `json:"updatedAt"`

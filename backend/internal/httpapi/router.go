@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"path"
@@ -32,16 +33,18 @@ type RouterDeps struct {
 }
 
 type API struct {
-	cfg     config.Config
-	db      *gorm.DB
-	session *session.Store
-	storage *storage.Client
-	r2Cache *responseCache
+	cfg         config.Config
+	db          *gorm.DB
+	session     *session.Store
+	storage     *storage.Client
+	r2Cache     *responseCache
+	accessIndex *directoryAccessIndex
 }
 
 type filesResponse struct {
 	Path    string              `json:"path"`
 	Entries []storage.FileEntry `json:"entries"`
+	Readme  string              `json:"readme,omitempty"`
 }
 
 type fileDetailResponse struct {
@@ -53,13 +56,18 @@ type readmeResponse struct {
 	Content string `json:"content"`
 }
 
+type readmeLoadResult struct {
+	response readmeResponse
+}
+
 func NewRouter(deps RouterDeps) *gin.Engine {
 	api := &API{
-		cfg:     deps.Config,
-		db:      deps.DB,
-		session: deps.Session,
-		storage: deps.Storage,
-		r2Cache: newResponseCache(),
+		cfg:         deps.Config,
+		db:          deps.DB,
+		session:     deps.Session,
+		storage:     deps.Storage,
+		r2Cache:     newResponseCache(),
+		accessIndex: newDirectoryAccessIndex(deps.DB, directoryAccessIndexTTL),
 	}
 
 	router := gin.New()
@@ -155,9 +163,18 @@ func (api *API) listFiles(c *gin.Context) {
 	if !api.ensureDirectoryAccess(c, dir) {
 		return
 	}
+	includeReadme := shouldIncludeReadme(c)
+	readmeCh, cancelReadme := api.startReadmeLoad(c.Request.Context(), dir, includeReadme)
+	if cancelReadme != nil {
+		defer cancelReadme()
+	}
+
 	cacheKey := listCacheKey(dir)
 	var cached filesResponse
 	if api.cachedJSON(c, cacheKey, &cached) {
+		if includeReadme {
+			cached.Readme = readmeForEntries(cached.Entries, readmeCh, cancelReadme)
+		}
 		writeJSON(c, http.StatusOK, cached)
 		return
 	}
@@ -168,6 +185,9 @@ func (api *API) listFiles(c *gin.Context) {
 	}
 	response := filesResponse{Path: dir, Entries: entries}
 	api.storeCachedJSON(c, cacheKey, response)
+	if includeReadme {
+		response.Readme = readmeForEntries(entries, readmeCh, cancelReadme)
+	}
 	writeJSON(c, http.StatusOK, response)
 }
 
@@ -207,26 +227,7 @@ func (api *API) readme(c *gin.Context) {
 	if !api.ensureDirectoryAccess(c, dir) {
 		return
 	}
-	readmePath := path.Join(dir, "README.md")
-	if dir == "/" {
-		readmePath = "/README.md"
-	}
-	cacheKey := readmeCacheKey(dir)
-	var cached readmeResponse
-	if api.cachedJSON(c, cacheKey, &cached) {
-		writeJSON(c, http.StatusOK, cached)
-		return
-	}
-	response := readmeResponse{Path: dir}
-	content, err := api.storage.ReadText(c.Request.Context(), readmePath)
-	if err != nil {
-		api.storeCachedJSON(c, cacheKey, response)
-		writeJSON(c, http.StatusOK, response)
-		return
-	}
-	response.Content = content
-	api.storeCachedJSON(c, cacheKey, response)
-	writeJSON(c, http.StatusOK, response)
+	writeJSON(c, http.StatusOK, api.cachedReadme(c, dir))
 }
 
 func (api *API) download(c *gin.Context) {
@@ -279,6 +280,9 @@ func (api *API) refreshFileCache(c *gin.Context) {
 	normalized, err := service.NormalizePath(req.Path)
 	if err != nil {
 		writeError(c, http.StatusBadRequest, "invalid_path", "路径不合法")
+		return
+	}
+	if !api.ensureDirectoryAccess(c, normalized) {
 		return
 	}
 	if err := api.session.DeleteCachePatterns(c.Request.Context(), cacheDeletePatterns(normalized)...); err != nil {
@@ -462,6 +466,9 @@ func (api *API) createDirectoryPassword(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "database_error", "创建目录密码失败")
 		return
 	}
+	if !api.invalidateDirectoryAccess(c) {
+		return
+	}
 	writeJSON(c, http.StatusCreated, gin.H{"directoryPassword": rule})
 }
 
@@ -507,6 +514,9 @@ func (api *API) updateDirectoryPassword(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "database_error", "更新目录密码失败")
 		return
 	}
+	if !api.invalidateDirectoryAccess(c) {
+		return
+	}
 	writeJSON(c, http.StatusOK, gin.H{"directoryPassword": rule})
 }
 
@@ -517,6 +527,9 @@ func (api *API) disableDirectoryPassword(c *gin.Context) {
 	}
 	if err := api.db.Delete(&model.DirectoryPassword{}, id).Error; err != nil {
 		writeError(c, http.StatusBadRequest, "database_error", "删除目录密码失败")
+		return
+	}
+	if !api.invalidateDirectoryAccess(c) {
 		return
 	}
 	writeJSON(c, http.StatusOK, gin.H{"ok": true})
@@ -608,28 +621,37 @@ func (api *API) ensureDirectoryAccess(c *gin.Context, dir string) bool {
 	if currentUser(c).Role == model.RoleAdmin {
 		return true
 	}
-	paths := service.DirectoryAncestors(dir)
-	var rules []model.DirectoryPassword
-	if err := api.db.Where("enabled = ? AND path IN ?", true, paths).Find(&rules).Error; err != nil {
+	version, err := api.session.DirectoryAccessVersion(c.Request.Context())
+	if err != nil {
+		api.accessIndex.Invalidate()
+		version = time.Now().UnixNano()
+	}
+	rules, err := api.accessIndex.RulesFor(c.Request.Context(), dir, version)
+	if err != nil {
 		writeError(c, http.StatusInternalServerError, "database_error", "读取目录密码失败")
 		return false
 	}
-	rulesByPath := make(map[string]model.DirectoryPassword, len(rules))
-	for _, rule := range rules {
-		rulesByPath[rule.Path] = rule
+	if len(rules) == 0 {
+		return true
 	}
+
 	token := c.GetString(tokenContextKey)
-	for _, protectedPath := range paths {
-		rule, ok := rulesByPath[protectedPath]
+	checks := make([]session.PasswordAccessCheck, len(rules))
+	for i, rule := range rules {
+		checks[i] = session.PasswordAccessCheck{Dir: rule.Path, Version: rule.Version}
+	}
+	passed, err := api.session.HasPasswordsPassed(c.Request.Context(), token, checks)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "session_error", "读取目录密码状态失败")
+		return false
+	}
+	if len(passed) != len(rules) {
+		writeError(c, http.StatusInternalServerError, "session_error", "读取目录密码状态失败")
+		return false
+	}
+	for i, ok := range passed {
 		if !ok {
-			continue
-		}
-		passed, err := api.session.HasPasswordPassed(c.Request.Context(), token, rule.Path, rule.Version)
-		if err != nil {
-			writeError(c, http.StatusInternalServerError, "session_error", "读取目录密码状态失败")
-			return false
-		}
-		if !passed {
+			rule := rules[i]
 			writeJSON(c, http.StatusForbidden, gin.H{
 				"error": gin.H{
 					"code":          "directory_password_required",
@@ -641,6 +663,96 @@ func (api *API) ensureDirectoryAccess(c *gin.Context, dir string) bool {
 		}
 	}
 	return true
+}
+
+func (api *API) invalidateDirectoryAccess(c *gin.Context) bool {
+	api.accessIndex.Invalidate()
+	if err := api.session.BumpDirectoryAccessVersion(c.Request.Context()); err != nil {
+		writeError(c, http.StatusInternalServerError, "cache_error", "同步目录密码缓存失败")
+		return false
+	}
+	return true
+}
+
+func (api *API) cachedReadme(c *gin.Context, dir string) readmeResponse {
+	cacheKey := readmeCacheKey(dir)
+	var cached readmeResponse
+	if api.cachedJSON(c, cacheKey, &cached) {
+		return cached
+	}
+
+	response := api.loadReadme(c.Request.Context(), dir)
+	api.storeCachedJSON(c, cacheKey, response)
+	return response
+}
+
+func (api *API) startReadmeLoad(ctx context.Context, dir string, enabled bool) (<-chan readmeLoadResult, context.CancelFunc) {
+	if !enabled {
+		return nil, nil
+	}
+
+	var cached readmeResponse
+	if _, ok := api.cachedJSONFromContext(ctx, readmeCacheKey(dir), &cached); ok {
+		ch := make(chan readmeLoadResult, 1)
+		ch <- readmeLoadResult{response: cached}
+		close(ch)
+		return ch, nil
+	}
+
+	readmeCtx, cancel := context.WithCancel(ctx)
+	ch := make(chan readmeLoadResult, 1)
+	go func() {
+		response := api.loadReadme(readmeCtx, dir)
+		if readmeCtx.Err() == nil {
+			api.storeCachedJSONContext(readmeCtx, readmeCacheKey(dir), response)
+		}
+		ch <- readmeLoadResult{response: response}
+		close(ch)
+	}()
+	return ch, cancel
+}
+
+func (api *API) loadReadme(ctx context.Context, dir string) readmeResponse {
+	response := readmeResponse{Path: dir}
+	content, err := api.storage.ReadText(ctx, readmePath(dir))
+	if err == nil {
+		response.Content = content
+	}
+	return response
+}
+
+func readmeForEntries(entries []storage.FileEntry, readmeCh <-chan readmeLoadResult, cancelReadme context.CancelFunc) string {
+	if readmeCh == nil {
+		return ""
+	}
+	if !entriesContainReadme(entries) {
+		if cancelReadme != nil {
+			cancelReadme()
+		}
+		return ""
+	}
+	return (<-readmeCh).response.Content
+}
+
+func entriesContainReadme(entries []storage.FileEntry) bool {
+	for _, entry := range entries {
+		if !entry.IsDir && strings.EqualFold(entry.Name, "README.md") {
+			return true
+		}
+	}
+	return false
+}
+
+func readmePath(dir string) string {
+	if dir == "/" {
+		return "/README.md"
+	}
+	return path.Join(dir, "README.md")
+}
+
+func shouldIncludeReadme(c *gin.Context) bool {
+	value := strings.ToLower(strings.TrimSpace(c.Query("includeReadme")))
+	return value == "1" || value == "true" || value == "yes"
 }
 
 func (api *API) normalizedQueryPath(c *gin.Context, key, fallback string) (string, bool) {
@@ -718,22 +830,33 @@ func (api *API) setCookie(c *gin.Context, name, value string, maxAge int) {
 }
 
 func (api *API) cachedJSON(c *gin.Context, key string, dest any) bool {
-	if api.r2Cache.GetJSON(key, dest) {
-		c.Header("X-PanShow-Cache", "local")
-		return true
-	}
-	if ok, err := api.session.GetJSON(c.Request.Context(), key, dest); err == nil && ok {
-		api.r2Cache.SetJSON(key, dest, api.cfg.R2CacheTTL)
-		c.Header("X-PanShow-Cache", "redis")
+	source, ok := api.cachedJSONFromContext(c.Request.Context(), key, dest)
+	if ok {
+		c.Header("X-PanShow-Cache", source)
 		return true
 	}
 	return false
 }
 
+func (api *API) cachedJSONFromContext(ctx context.Context, key string, dest any) (string, bool) {
+	if api.r2Cache.GetJSON(key, dest) {
+		return "local", true
+	}
+	if ok, err := api.session.GetJSON(ctx, key, dest); err == nil && ok {
+		api.r2Cache.SetJSON(key, dest, api.cfg.R2CacheTTL)
+		return "redis", true
+	}
+	return "", false
+}
+
 func (api *API) storeCachedJSON(c *gin.Context, key string, value any) {
-	api.r2Cache.SetJSON(key, value, api.cfg.R2CacheTTL)
-	_ = api.session.SetJSON(c.Request.Context(), key, value, api.cfg.R2CacheTTL)
+	api.storeCachedJSONContext(c.Request.Context(), key, value)
 	c.Header("X-PanShow-Cache", "miss")
+}
+
+func (api *API) storeCachedJSONContext(ctx context.Context, key string, value any) {
+	api.r2Cache.SetJSON(key, value, api.cfg.R2CacheTTL)
+	_ = api.session.SetJSON(ctx, key, value, api.cfg.R2CacheTTL)
 }
 
 func isNotFound(err error) bool {
