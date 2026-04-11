@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -24,6 +23,7 @@ import (
 const userContextKey = "panshow_user"
 const tokenContextKey = "panshow_session_token"
 const accessTokenHeader = "X-PanShow-Access-Token"
+const announcementCacheTTL = 5 * time.Minute
 
 type RouterDeps struct {
 	Config  config.Config
@@ -42,22 +42,33 @@ type API struct {
 }
 
 type filesResponse struct {
-	Path    string              `json:"path"`
-	Entries []storage.FileEntry `json:"entries"`
-	Readme  string              `json:"readme,omitempty"`
+	Path          string                 `json:"path"`
+	Entries       []storage.FileEntry    `json:"entries"`
+	Announcements []announcementResponse `json:"announcements,omitempty"`
 }
 
 type fileDetailResponse struct {
 	File storage.FileEntry `json:"file"`
 }
 
-type readmeResponse struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
+type announcementResponse struct {
+	ID        uint   `json:"id"`
+	Title     string `json:"title"`
+	Content   string `json:"content"`
+	SortOrder int    `json:"sortOrder"`
 }
 
-type readmeLoadResult struct {
-	response readmeResponse
+type announcementsLoadResult struct {
+	announcements []announcementResponse
+	err           error
+}
+
+type cachedAnnouncement struct {
+	ID        uint   `json:"id"`
+	Title     string `json:"title"`
+	Pattern   string `json:"pattern"`
+	Content   string `json:"content"`
+	SortOrder int    `gorm:"column:sort_order" json:"sortOrder"`
 }
 
 func NewRouter(deps RouterDeps) *gin.Engine {
@@ -93,7 +104,6 @@ func NewRouter(deps RouterDeps) *gin.Engine {
 	public.POST("/access/password", api.submitDirectoryPassword)
 	public.GET("/files", api.listFiles)
 	public.GET("/files/detail", api.fileDetail)
-	public.GET("/readme", api.readme)
 	public.GET("/files/download", api.download)
 	public.GET("/files/preview", api.preview)
 	public.POST("/files/cache/refresh", api.refreshFileCache)
@@ -108,6 +118,11 @@ func NewRouter(deps RouterDeps) *gin.Engine {
 	admin.POST("/directory-passwords", api.createDirectoryPassword)
 	admin.PATCH("/directory-passwords/:id", api.updateDirectoryPassword)
 	admin.DELETE("/directory-passwords/:id", api.disableDirectoryPassword)
+	admin.GET("/announcements", api.listAnnouncements)
+	admin.POST("/announcements", api.createAnnouncement)
+	admin.POST("/announcements/cache/refresh", api.refreshAnnouncementCache)
+	admin.PATCH("/announcements/:id", api.updateAnnouncement)
+	admin.DELETE("/announcements/:id", api.deleteAnnouncement)
 
 	return router
 }
@@ -163,18 +178,19 @@ func (api *API) listFiles(c *gin.Context) {
 	if !api.ensureDirectoryAccess(c, dir) {
 		return
 	}
-	includeReadme := shouldIncludeReadme(c)
-	readmeCh, cancelReadme := api.startReadmeLoad(c.Request.Context(), dir, includeReadme)
-	if cancelReadme != nil {
-		defer cancelReadme()
-	}
+	announcementCtx, cancelAnnouncements := context.WithCancel(c.Request.Context())
+	defer cancelAnnouncements()
+	announcementsCh := api.startAnnouncementsLoad(announcementCtx, dir)
 
 	cacheKey := listCacheKey(dir)
 	var cached filesResponse
 	if api.cachedJSON(c, cacheKey, &cached) {
-		if includeReadme {
-			cached.Readme = readmeForEntries(cached.Entries, readmeCh, cancelReadme)
+		result := <-announcementsCh
+		if result.err != nil {
+			writeError(c, http.StatusInternalServerError, "announcement_error", "读取公告失败")
+			return
 		}
+		cached.Announcements = result.announcements
 		writeJSON(c, http.StatusOK, cached)
 		return
 	}
@@ -185,9 +201,12 @@ func (api *API) listFiles(c *gin.Context) {
 	}
 	response := filesResponse{Path: dir, Entries: entries}
 	api.storeCachedJSON(c, cacheKey, response)
-	if includeReadme {
-		response.Readme = readmeForEntries(entries, readmeCh, cancelReadme)
+	result := <-announcementsCh
+	if result.err != nil {
+		writeError(c, http.StatusInternalServerError, "announcement_error", "读取公告失败")
+		return
 	}
+	response.Announcements = result.announcements
 	writeJSON(c, http.StatusOK, response)
 }
 
@@ -217,17 +236,6 @@ func (api *API) fileDetail(c *gin.Context) {
 	response := fileDetailResponse{File: entry}
 	api.storeCachedJSON(c, cacheKey, response)
 	writeJSON(c, http.StatusOK, response)
-}
-
-func (api *API) readme(c *gin.Context) {
-	dir, ok := api.normalizedQueryPath(c, "path", "/")
-	if !ok {
-		return
-	}
-	if !api.ensureDirectoryAccess(c, dir) {
-		return
-	}
-	writeJSON(c, http.StatusOK, api.cachedReadme(c, dir))
 }
 
 func (api *API) download(c *gin.Context) {
@@ -436,6 +444,132 @@ func (api *API) listDirectoryPasswords(c *gin.Context) {
 		return
 	}
 	writeJSON(c, http.StatusOK, gin.H{"directoryPasswords": rules})
+}
+
+func (api *API) listAnnouncements(c *gin.Context) {
+	var announcements []model.Announcement
+	if err := api.db.Order("sort_order asc, id asc").Find(&announcements).Error; err != nil {
+		writeError(c, http.StatusInternalServerError, "database_error", "读取公告失败")
+		return
+	}
+	writeJSON(c, http.StatusOK, gin.H{"announcements": announcements})
+}
+
+func (api *API) createAnnouncement(c *gin.Context) {
+	var req struct {
+		Title     string `json:"title"`
+		Pattern   string `json:"pattern" binding:"required"`
+		Content   string `json:"content" binding:"required"`
+		Enabled   *bool  `json:"enabled"`
+		SortOrder *int   `json:"sortOrder"`
+	}
+	if !bindJSON(c, &req) {
+		return
+	}
+	announcement, ok := buildAnnouncementFromRequest(c, req.Title, req.Pattern, req.Content, req.Enabled, req.SortOrder)
+	if !ok {
+		return
+	}
+	if err := api.db.Create(&announcement).Error; err != nil {
+		writeError(c, http.StatusBadRequest, "database_error", "创建公告失败")
+		return
+	}
+	if !api.invalidateAnnouncements(c) {
+		return
+	}
+	writeJSON(c, http.StatusCreated, gin.H{"announcement": announcement})
+}
+
+func (api *API) updateAnnouncement(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	var req struct {
+		Title     *string `json:"title"`
+		Pattern   *string `json:"pattern"`
+		Content   *string `json:"content"`
+		Enabled   *bool   `json:"enabled"`
+		SortOrder *int    `json:"sortOrder"`
+	}
+	if !bindJSON(c, &req) {
+		return
+	}
+
+	var announcement model.Announcement
+	if err := api.db.First(&announcement, id).Error; err != nil {
+		writeError(c, http.StatusNotFound, "not_found", "公告不存在")
+		return
+	}
+
+	updates := map[string]any{}
+	if req.Title != nil {
+		updates["title"] = cleanAnnouncementTitle(*req.Title)
+	}
+	if req.Pattern != nil {
+		pattern, err := service.NormalizePathPattern(*req.Pattern)
+		if err != nil {
+			writeError(c, http.StatusBadRequest, "invalid_pattern", "公告路径规则不合法")
+			return
+		}
+		updates["pattern"] = pattern
+	}
+	if req.Content != nil {
+		content := strings.TrimSpace(*req.Content)
+		if content == "" {
+			writeError(c, http.StatusBadRequest, "invalid_content", "公告内容不能为空")
+			return
+		}
+		updates["content"] = content
+	}
+	if req.Enabled != nil {
+		updates["enabled"] = *req.Enabled
+	}
+	if req.SortOrder != nil {
+		updates["sort_order"] = *req.SortOrder
+	}
+	if len(updates) == 0 {
+		writeError(c, http.StatusBadRequest, "empty_update", "没有可更新字段")
+		return
+	}
+	if err := api.db.Model(&announcement).Updates(updates).Error; err != nil {
+		writeError(c, http.StatusBadRequest, "database_error", "更新公告失败")
+		return
+	}
+	if !api.invalidateAnnouncements(c) {
+		return
+	}
+	if err := api.db.First(&announcement, id).Error; err != nil {
+		writeError(c, http.StatusInternalServerError, "database_error", "读取公告失败")
+		return
+	}
+	writeJSON(c, http.StatusOK, gin.H{"announcement": announcement})
+}
+
+func (api *API) deleteAnnouncement(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	if err := api.db.Delete(&model.Announcement{}, id).Error; err != nil {
+		writeError(c, http.StatusBadRequest, "database_error", "删除公告失败")
+		return
+	}
+	if !api.invalidateAnnouncements(c) {
+		return
+	}
+	writeJSON(c, http.StatusOK, gin.H{"ok": true})
+}
+
+func (api *API) refreshAnnouncementCache(c *gin.Context) {
+	if !api.invalidateAnnouncements(c) {
+		return
+	}
+	if err := api.session.DeleteCachePatterns(c.Request.Context(), "announcements:enabled:*"); err != nil {
+		writeError(c, http.StatusInternalServerError, "cache_error", "刷新公告缓存失败")
+		return
+	}
+	writeJSON(c, http.StatusOK, gin.H{"ok": true})
 }
 
 func (api *API) createDirectoryPassword(c *gin.Context) {
@@ -674,87 +808,6 @@ func (api *API) invalidateDirectoryAccess(c *gin.Context) bool {
 	return true
 }
 
-func (api *API) cachedReadme(c *gin.Context, dir string) readmeResponse {
-	cacheKey := readmeCacheKey(dir)
-	var cached readmeResponse
-	if api.cachedJSON(c, cacheKey, &cached) {
-		return cached
-	}
-
-	response := api.loadReadme(c.Request.Context(), dir)
-	api.storeCachedJSON(c, cacheKey, response)
-	return response
-}
-
-func (api *API) startReadmeLoad(ctx context.Context, dir string, enabled bool) (<-chan readmeLoadResult, context.CancelFunc) {
-	if !enabled {
-		return nil, nil
-	}
-
-	var cached readmeResponse
-	if _, ok := api.cachedJSONFromContext(ctx, readmeCacheKey(dir), &cached); ok {
-		ch := make(chan readmeLoadResult, 1)
-		ch <- readmeLoadResult{response: cached}
-		close(ch)
-		return ch, nil
-	}
-
-	readmeCtx, cancel := context.WithCancel(ctx)
-	ch := make(chan readmeLoadResult, 1)
-	go func() {
-		response := api.loadReadme(readmeCtx, dir)
-		if readmeCtx.Err() == nil {
-			api.storeCachedJSONContext(readmeCtx, readmeCacheKey(dir), response)
-		}
-		ch <- readmeLoadResult{response: response}
-		close(ch)
-	}()
-	return ch, cancel
-}
-
-func (api *API) loadReadme(ctx context.Context, dir string) readmeResponse {
-	response := readmeResponse{Path: dir}
-	content, err := api.storage.ReadText(ctx, readmePath(dir))
-	if err == nil {
-		response.Content = content
-	}
-	return response
-}
-
-func readmeForEntries(entries []storage.FileEntry, readmeCh <-chan readmeLoadResult, cancelReadme context.CancelFunc) string {
-	if readmeCh == nil {
-		return ""
-	}
-	if !entriesContainReadme(entries) {
-		if cancelReadme != nil {
-			cancelReadme()
-		}
-		return ""
-	}
-	return (<-readmeCh).response.Content
-}
-
-func entriesContainReadme(entries []storage.FileEntry) bool {
-	for _, entry := range entries {
-		if !entry.IsDir && strings.EqualFold(entry.Name, "README.md") {
-			return true
-		}
-	}
-	return false
-}
-
-func readmePath(dir string) string {
-	if dir == "/" {
-		return "/README.md"
-	}
-	return path.Join(dir, "README.md")
-}
-
-func shouldIncludeReadme(c *gin.Context) bool {
-	value := strings.ToLower(strings.TrimSpace(c.Query("includeReadme")))
-	return value == "1" || value == "true" || value == "yes"
-}
-
 func (api *API) normalizedQueryPath(c *gin.Context, key, fallback string) (string, bool) {
 	value := c.Query(key)
 	if value == "" {
@@ -766,6 +819,118 @@ func (api *API) normalizedQueryPath(c *gin.Context, key, fallback string) (strin
 		return "", false
 	}
 	return normalized, true
+}
+
+func (api *API) startAnnouncementsLoad(ctx context.Context, dir string) <-chan announcementsLoadResult {
+	ch := make(chan announcementsLoadResult, 1)
+	go func() {
+		announcements, err := api.announcementsForPath(ctx, dir)
+		ch <- announcementsLoadResult{announcements: announcements, err: err}
+		close(ch)
+	}()
+	return ch
+}
+
+func (api *API) announcementsForPath(ctx context.Context, dir string) ([]announcementResponse, error) {
+	version, err := api.session.AnnouncementVersion(ctx)
+	useCache := err == nil
+	if !useCache {
+		version = time.Now().UnixNano()
+	}
+
+	announcements, err := api.enabledAnnouncements(ctx, version, useCache)
+	if err != nil {
+		return nil, err
+	}
+
+	matches := make([]announcementResponse, 0, len(announcements))
+	for _, announcement := range announcements {
+		if !service.MatchPathPattern(announcement.Pattern, dir) {
+			continue
+		}
+		matches = append(matches, announcementResponse{
+			ID:        announcement.ID,
+			Title:     announcement.Title,
+			Content:   announcement.Content,
+			SortOrder: announcement.SortOrder,
+		})
+	}
+	return matches, nil
+}
+
+func (api *API) enabledAnnouncements(ctx context.Context, version int64, useCache bool) ([]cachedAnnouncement, error) {
+	cacheKey := announcementListCacheKey(version)
+	var cached []cachedAnnouncement
+	if useCache {
+		ok, err := api.session.GetJSON(ctx, cacheKey, &cached)
+		if err != nil {
+			useCache = false
+		} else if ok {
+			return cached, nil
+		}
+	}
+
+	var announcements []cachedAnnouncement
+	if err := api.db.WithContext(ctx).
+		Model(&model.Announcement{}).
+		Select("id", "title", "pattern", "content", "sort_order").
+		Where("enabled = ?", true).
+		Order("sort_order asc, id asc").
+		Find(&announcements).Error; err != nil {
+		return nil, err
+	}
+	if useCache {
+		_ = api.session.SetJSON(ctx, cacheKey, announcements, announcementCacheTTL)
+	}
+	return announcements, nil
+}
+
+func (api *API) invalidateAnnouncements(c *gin.Context) bool {
+	if err := api.session.BumpAnnouncementVersion(c.Request.Context()); err != nil {
+		writeError(c, http.StatusInternalServerError, "cache_error", "同步公告缓存失败")
+		return false
+	}
+	return true
+}
+
+func buildAnnouncementFromRequest(c *gin.Context, title, pattern, content string, enabled *bool, sortOrder *int) (model.Announcement, bool) {
+	normalizedPattern, err := service.NormalizePathPattern(pattern)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, "invalid_pattern", "公告路径规则不合法")
+		return model.Announcement{}, false
+	}
+	content = strings.TrimSpace(content)
+	if content == "" {
+		writeError(c, http.StatusBadRequest, "invalid_content", "公告内容不能为空")
+		return model.Announcement{}, false
+	}
+
+	announcement := model.Announcement{
+		Title:     cleanAnnouncementTitle(title),
+		Pattern:   normalizedPattern,
+		Content:   content,
+		Enabled:   true,
+		SortOrder: 100,
+	}
+	if enabled != nil {
+		announcement.Enabled = *enabled
+	}
+	if sortOrder != nil {
+		announcement.SortOrder = *sortOrder
+	}
+	return announcement, true
+}
+
+func cleanAnnouncementTitle(title string) string {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return "公告"
+	}
+	runes := []rune(title)
+	if len(runes) > 160 {
+		return string(runes[:160])
+	}
+	return title
 }
 
 func currentUser(c *gin.Context) model.User {
@@ -867,12 +1032,12 @@ func listCacheKey(dir string) string {
 	return "r2:list:" + cacheDirPath(dir)
 }
 
-func readmeCacheKey(dir string) string {
-	return "r2:readme:" + cacheDirPath(dir)
-}
-
 func statCacheKey(filePath string) string {
 	return "r2:stat:" + filePath
+}
+
+func announcementListCacheKey(version int64) string {
+	return "announcements:enabled:" + strconv.FormatInt(version, 10)
 }
 
 func cacheDirPath(dir string) string {
@@ -884,15 +1049,13 @@ func cacheDirPath(dir string) string {
 
 func cacheDeletePatterns(targetPath string) []string {
 	if targetPath == "/" {
-		return []string{"r2:list:*", "r2:readme:*", "r2:stat:*"}
+		return []string{"r2:list:*", "r2:stat:*"}
 	}
 	dir := cacheDirPath(targetPath)
 	return []string{
 		escapeCachePattern(listCacheKey(targetPath)),
-		escapeCachePattern(readmeCacheKey(targetPath)),
 		escapeCachePattern(statCacheKey(targetPath)),
 		escapeCachePattern("r2:list:"+dir) + "*",
-		escapeCachePattern("r2:readme:"+dir) + "*",
 		escapeCachePattern("r2:stat:"+dir) + "*",
 	}
 }

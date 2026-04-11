@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"mime"
 	"path"
 	"strings"
@@ -113,23 +112,6 @@ func (c *Client) Stat(ctx context.Context, filePath string) (FileEntry, error) {
 		LastModified: out.LastModified,
 		ContentType:  aws.ToString(out.ContentType),
 	}, nil
-}
-
-func (c *Client) ReadText(ctx context.Context, filePath string) (string, error) {
-	out, err := c.s3.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(c.bucket),
-		Key:    aws.String(c.keyForFile(filePath)),
-	})
-	if err != nil {
-		return "", err
-	}
-	defer out.Body.Close()
-
-	data, err := io.ReadAll(out.Body)
-	if err != nil {
-		return "", err
-	}
-	return string(data), nil
 }
 
 func (c *Client) PresignDownload(ctx context.Context, filePath string, ttl time.Duration) (string, error) {

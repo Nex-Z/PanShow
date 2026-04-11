@@ -16,6 +16,7 @@ const (
 	authCookieName            = "panshow_auth"
 	accessCookieName          = "panshow_access"
 	directoryAccessVersionKey = "panshow:directory-access:version"
+	announcementVersionKey    = "panshow:announcements:version"
 )
 
 type Store struct {
@@ -101,6 +102,18 @@ func (s *Store) DirectoryAccessVersion(ctx context.Context) (int64, error) {
 
 func (s *Store) BumpDirectoryAccessVersion(ctx context.Context) error {
 	return s.client.Incr(ctx, directoryAccessVersionKey).Err()
+}
+
+func (s *Store) AnnouncementVersion(ctx context.Context) (int64, error) {
+	version, err := s.client.Get(ctx, announcementVersionKey).Int64()
+	if err == redis.Nil {
+		return 0, nil
+	}
+	return version, err
+}
+
+func (s *Store) BumpAnnouncementVersion(ctx context.Context) error {
+	return s.client.Incr(ctx, announcementVersionKey).Err()
 }
 
 func (s *Store) MarkPasswordPassed(ctx context.Context, token, dir string, version uint) error {

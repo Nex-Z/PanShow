@@ -7,12 +7,17 @@ import (
 	"time"
 )
 
+const responseCacheMaxItems = 128
+const responseCacheMaxBytes = 16 * 1024 * 1024
+
 type responseCache struct {
-	mu    sync.RWMutex
-	items map[string]responseCacheItem
+	mu         sync.RWMutex
+	items      map[string]responseCacheItem
+	totalBytes int
 }
 
 type responseCacheItem struct {
+	createdAt time.Time
 	data      []byte
 	expiresAt time.Time
 }
@@ -30,7 +35,9 @@ func (cache *responseCache) GetJSON(key string, dest any) bool {
 	}
 	if time.Now().After(item.expiresAt) {
 		cache.mu.Lock()
-		delete(cache.items, key)
+		if current, ok := cache.items[key]; ok && current.expiresAt.Equal(item.expiresAt) {
+			cache.deleteLocked(key)
+		}
 		cache.mu.Unlock()
 		return false
 	}
@@ -45,8 +52,18 @@ func (cache *responseCache) SetJSON(key string, value any, ttl time.Duration) {
 	if err != nil {
 		return
 	}
+	if len(data) > responseCacheMaxBytes {
+		cache.mu.Lock()
+		cache.deleteLocked(key)
+		cache.mu.Unlock()
+		return
+	}
+	now := time.Now()
 	cache.mu.Lock()
-	cache.items[key] = responseCacheItem{data: data, expiresAt: time.Now().Add(ttl)}
+	cache.deleteLocked(key)
+	cache.items[key] = responseCacheItem{createdAt: now, data: data, expiresAt: now.Add(ttl)}
+	cache.totalBytes += len(data)
+	cache.pruneLocked(now)
 	cache.mu.Unlock()
 }
 
@@ -56,10 +73,37 @@ func (cache *responseCache) DeletePatterns(patterns ...string) {
 	for key := range cache.items {
 		for _, pattern := range patterns {
 			if cachePatternMatches(pattern, key) {
-				delete(cache.items, key)
+				cache.deleteLocked(key)
 				break
 			}
 		}
+	}
+}
+
+func (cache *responseCache) pruneLocked(now time.Time) {
+	for key, item := range cache.items {
+		if now.After(item.expiresAt) {
+			cache.deleteLocked(key)
+		}
+	}
+
+	for (len(cache.items) > responseCacheMaxItems || cache.totalBytes > responseCacheMaxBytes) && len(cache.items) > 0 {
+		var oldestKey string
+		var oldestAt time.Time
+		for key, item := range cache.items {
+			if oldestKey == "" || item.createdAt.Before(oldestAt) {
+				oldestKey = key
+				oldestAt = item.createdAt
+			}
+		}
+		cache.deleteLocked(oldestKey)
+	}
+}
+
+func (cache *responseCache) deleteLocked(key string) {
+	if item, ok := cache.items[key]; ok {
+		cache.totalBytes -= len(item.data)
+		delete(cache.items, key)
 	}
 }
 

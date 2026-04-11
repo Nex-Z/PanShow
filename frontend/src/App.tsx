@@ -1,11 +1,14 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { DownloadIcon, EyeIcon, FileIcon, FolderIcon, RefreshCwIcon } from "lucide-react";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { api, RequestError } from "./api/client";
-import type { DirectoryPassword, FileEntry, User } from "./types";
+import type { Announcement, DirectoryPassword, FileEntry, PublicAnnouncement, User } from "./types";
 
 type View = "files" | "admin" | "login";
 type R2Route = { kind: "directory"; path: string } | { kind: "file"; path: string };
+
+const markdownPlugins = [remarkGfm];
 
 export function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -126,7 +129,7 @@ function FileBrowser() {
   const [route, setRoute] = useState<R2Route>(() => parseR2Route(window.location.pathname));
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [file, setFile] = useState<FileEntry | null>(null);
-  const [readme, setReadme] = useState("");
+  const [announcements, setAnnouncements] = useState<PublicAnnouncement[]>([]);
   const [requiredPaths, setRequiredPaths] = useState<string[]>([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -148,12 +151,12 @@ function FileBrowser() {
         const result = await api.fileDetail(nextRoute.path);
         setFile(result.file);
         setEntries([]);
-        setReadme("");
+        setAnnouncements([]);
         return;
       }
-      const files = await api.listFiles(nextRoute.path, true);
+      const files = await api.listFiles(nextRoute.path);
       setEntries(files.entries);
-      setReadme(files.readme ?? "");
+      setAnnouncements(files.announcements ?? []);
     } catch (err) {
       if (err instanceof RequestError && err.error.code === "directory_password_required") {
         setRequiredPaths(err.error.requiredPaths ?? []);
@@ -209,14 +212,7 @@ function FileBrowser() {
 
   return (
     <section className="workspace">
-      {readme ? (
-        <aside className="readme-pane">
-          <p className="eyebrow">公告</p>
-          <article className="markdown">
-            <ReactMarkdown>{readme}</ReactMarkdown>
-          </article>
-        </aside>
-      ) : null}
+      {announcements.length > 0 ? <AnnouncementPane announcements={announcements} /> : null}
       <div className="browser-pane">
         <div className="browser-tools">
           <div className="breadcrumbs" aria-label="路径导航">
@@ -308,6 +304,25 @@ function FileDetail({ file, onDownload, onPreview }: { file: FileEntry; onDownlo
   );
 }
 
+function AnnouncementPane({ announcements }: { announcements: PublicAnnouncement[] }) {
+  return (
+    <aside className="announcement-pane">
+      <h2>公告</h2>
+      <div className="announcement-stack">
+        {announcements.map((announcement) => (
+          <article className="announcement-entry" key={announcement.id}>
+            <div className="markdown">
+              <ReactMarkdown remarkPlugins={markdownPlugins} skipHtml>
+                {announcement.content}
+              </ReactMarkdown>
+            </div>
+          </article>
+        ))}
+      </div>
+    </aside>
+  );
+}
+
 function EmptyState() {
   return (
     <div className="empty-state">
@@ -356,19 +371,22 @@ function AdminPanel() {
   const [config, setConfig] = useState<{ r2Bucket: string; r2RootPrefix: string; corsOrigins?: string[] } | null>(null);
   const [users, setUsers] = useState<User[]>([]);
   const [rules, setRules] = useState<DirectoryPassword[]>([]);
+  const [announcements, setAnnouncements] = useState<Announcement[]>([]);
   const [notice, setNotice] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
   const load = useCallback(async () => {
-    const [status, config, users, rules] = await Promise.all([
+    const [status, config, users, rules, announcements] = await Promise.all([
       api.adminStatus(),
       api.adminConfig(),
       api.listUsers(),
-      api.listDirectoryPasswords()
+      api.listDirectoryPasswords(),
+      api.listAnnouncements()
     ]);
     setStatus(status);
     setConfig(config);
     setUsers(users.users);
     setRules(rules.directoryPasswords);
+    setAnnouncements(announcements.announcements);
   }, []);
 
   useEffect(() => {
@@ -423,70 +441,228 @@ function AdminPanel() {
     });
   }
 
+  async function createAnnouncement(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
+    await runAdminAction("公告已发布", async () => {
+      await api.createAnnouncement({
+        title: String(form.get("title")),
+        pattern: String(form.get("pattern")),
+        content: String(form.get("content")),
+        enabled: form.get("enabled") === "on",
+        sortOrder: Number(form.get("sortOrder") || 100)
+      });
+      formElement.reset();
+      await load();
+    });
+  }
+
+  async function updateAnnouncement(
+    id: number,
+    body: Partial<Pick<Announcement, "title" | "pattern" | "content" | "enabled" | "sortOrder">>
+  ) {
+    await runAdminAction("公告已更新", async () => {
+      await api.updateAnnouncement(id, body);
+      await load();
+    });
+  }
+
+  async function deleteAnnouncement(id: number) {
+    await runAdminAction("公告已删除", async () => {
+      await api.deleteAnnouncement(id);
+      await load();
+    });
+  }
+
+  async function refreshAnnouncementCache() {
+    await runAdminAction("公告缓存已刷新", async () => {
+      await api.refreshAnnouncementCache();
+      await load();
+    });
+  }
+
   return (
-    <section className="admin-grid">
-      <div className="admin-panel">
-        <p className="eyebrow">系统状态</p>
-        <h2>连接</h2>
-        <div className="status-grid">
-          <StatusPill label="PostgreSQL" ok={status?.database} />
-          <StatusPill label="Redis" ok={status?.redis} />
-          <StatusPill label="R2" ok={status?.r2} />
-        </div>
-        {config ? (
-          <dl className="config-list">
-            <div>
-              <dt>Bucket</dt>
-              <dd>{config.r2Bucket || "未配置"}</dd>
-            </div>
-            <div>
-              <dt>Root prefix</dt>
-              <dd>{config.r2RootPrefix || "/"}</dd>
-            </div>
-            <div>
-              <dt>CORS</dt>
-              <dd>{config.corsOrigins?.join(", ") || "未配置"}</dd>
-            </div>
-          </dl>
-        ) : null}
-      </div>
+    <section className="admin-layout">
+      <aside className="admin-sidebar">
+        <section className="admin-panel">
+          <p className="eyebrow">系统状态</p>
+          <h2>连接</h2>
+          <div className="status-grid">
+            <StatusPill label="PostgreSQL" ok={status?.database} />
+            <StatusPill label="Redis" ok={status?.redis} />
+            <StatusPill label="R2" ok={status?.r2} />
+          </div>
+          {config ? (
+            <dl className="config-list">
+              <div>
+                <dt>Bucket</dt>
+                <dd>{config.r2Bucket || "未配置"}</dd>
+              </div>
+              <div>
+                <dt>Root prefix</dt>
+                <dd>{config.r2RootPrefix || "/"}</dd>
+              </div>
+              <div>
+                <dt>CORS</dt>
+                <dd>{config.corsOrigins?.join(", ") || "未配置"}</dd>
+              </div>
+            </dl>
+          ) : null}
+        </section>
 
-      <div className="admin-panel">
-        <p className="eyebrow">用户</p>
-        <form className="inline-form" onSubmit={(event) => void createUser(event)}>
-          <input name="username" placeholder="用户名" required />
-          <input name="password" placeholder="密码" type="password" required />
-          <select name="role" defaultValue="user">
-            <option value="user">user</option>
-            <option value="admin">admin</option>
-          </select>
-          <button className="button primary">创建</button>
-        </form>
-        <DataList
-          rows={users.map((user) => ({
-            key: String(user.id),
-            title: user.username,
-            meta: `${user.role} · ${user.active ? "启用" : "停用"}`
-          }))}
-        />
-      </div>
+        <section className="admin-panel">
+          <p className="eyebrow">用户</p>
+          <form className="admin-form compact-form" onSubmit={(event) => void createUser(event)}>
+            <input name="username" placeholder="用户名" required />
+            <input name="password" placeholder="密码" type="password" required />
+            <select name="role" defaultValue="user">
+              <option value="user">user</option>
+              <option value="admin">admin</option>
+            </select>
+            <button className="button primary">创建用户</button>
+          </form>
+          <DataList
+            rows={users.map((user) => ({
+              key: String(user.id),
+              title: user.username,
+              meta: `${user.role} · ${user.active ? "启用" : "停用"}`
+            }))}
+          />
+        </section>
+      </aside>
 
-      <div className="admin-panel wide">
-        <p className="eyebrow">目录密码</p>
-        <form className="inline-form" onSubmit={(event) => void createRule(event)}>
-          <input name="path" placeholder="/protected/path" required />
-          <input name="password" placeholder="密码" type="password" required />
-          <button className="button primary">创建</button>
-        </form>
-        <div className="data-list">
-          {rules.length === 0 ? <p className="muted">暂无数据。</p> : null}
-          {rules.map((rule) => (
-            <DirectoryPasswordRow key={rule.id} rule={rule} onUpdate={updateRule} onDelete={deleteRule} />
-          ))}
-        </div>
+      <div className="admin-main">
+        <section className="admin-panel">
+          <div className="section-heading compact">
+            <div>
+              <p className="eyebrow">公告</p>
+              <h2>发布与缓存</h2>
+            </div>
+            <button className="button" onClick={() => void refreshAnnouncementCache()}>
+              刷新公告缓存
+            </button>
+          </div>
+          <form className="admin-form announcement-form" onSubmit={(event) => void createAnnouncement(event)}>
+            <input name="title" placeholder="标题" defaultValue="公告" />
+            <input name="pattern" placeholder="/ 或 /docs/**" defaultValue="/**" required />
+            <input name="sortOrder" placeholder="排序" type="number" defaultValue={100} />
+            <label className="checkbox-label">
+              <input name="enabled" type="checkbox" defaultChecked />
+              启用
+            </label>
+            <textarea name="content" placeholder="支持 Markdown，内容可较长" required />
+            <button className="button primary">发布公告</button>
+          </form>
+          <div className="data-list">
+            {announcements.length === 0 ? <p className="muted">暂无公告。</p> : null}
+            {announcements.map((announcement) => (
+              <AnnouncementRow
+                key={announcement.id}
+                announcement={announcement}
+                onUpdate={updateAnnouncement}
+                onDelete={deleteAnnouncement}
+              />
+            ))}
+          </div>
+        </section>
+
+        <section className="admin-panel">
+          <p className="eyebrow">目录密码</p>
+          <form className="admin-form directory-form" onSubmit={(event) => void createRule(event)}>
+            <input name="path" placeholder="/protected/path" required />
+            <input name="password" placeholder="密码" type="password" required />
+            <button className="button primary">创建目录密码</button>
+          </form>
+          <div className="data-list">
+            {rules.length === 0 ? <p className="muted">暂无数据。</p> : null}
+            {rules.map((rule) => (
+              <DirectoryPasswordRow key={rule.id} rule={rule} onUpdate={updateRule} onDelete={deleteRule} />
+            ))}
+          </div>
+        </section>
       </div>
       {notice ? <p className={`toast ${notice.type}`}>{notice.text}</p> : null}
     </section>
+  );
+}
+
+function AnnouncementRow({
+  announcement,
+  onUpdate,
+  onDelete
+}: {
+  announcement: Announcement;
+  onUpdate: (
+    id: number,
+    body: Partial<Pick<Announcement, "title" | "pattern" | "content" | "enabled" | "sortOrder">>
+  ) => Promise<void>;
+  onDelete: (id: number) => Promise<void>;
+}) {
+  const [title, setTitle] = useState(announcement.title);
+  const [pattern, setPattern] = useState(announcement.pattern);
+  const [content, setContent] = useState(announcement.content);
+  const [enabled, setEnabled] = useState(announcement.enabled);
+  const [sortOrder, setSortOrder] = useState(announcement.sortOrder);
+
+  useEffect(() => {
+    setTitle(announcement.title);
+    setPattern(announcement.pattern);
+    setContent(announcement.content);
+    setEnabled(announcement.enabled);
+    setSortOrder(announcement.sortOrder);
+  }, [announcement]);
+
+  async function handleSave() {
+    await onUpdate(announcement.id, { title, pattern, content, enabled, sortOrder });
+  }
+
+  return (
+    <article className="announcement-row">
+      <div className="announcement-edit-grid">
+        <label>
+          标题
+          <input value={title} onChange={(event) => setTitle(event.target.value)} />
+        </label>
+        <label>
+          目录规则
+          <input value={pattern} onChange={(event) => setPattern(event.target.value)} />
+        </label>
+        <label>
+          排序
+          <input
+            value={sortOrder}
+            onChange={(event) => setSortOrder(Number(event.target.value || 0))}
+            type="number"
+          />
+        </label>
+        <label className="checkbox-label">
+          <input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />
+          启用
+        </label>
+      </div>
+      <label>
+        Markdown 内容
+        <textarea value={content} onChange={(event) => setContent(event.target.value)} />
+      </label>
+      <details className="markdown-preview">
+        <summary>预览</summary>
+        <div className="markdown">
+          <ReactMarkdown remarkPlugins={markdownPlugins} skipHtml>
+            {content}
+          </ReactMarkdown>
+        </div>
+      </details>
+      <div className="row-actions">
+        <span className="muted">#{announcement.id}</span>
+        <button className="button primary" onClick={() => void handleSave()}>
+          保存
+        </button>
+        <button className="button danger" onClick={() => void onDelete(announcement.id)}>
+          删除
+        </button>
+      </div>
+    </article>
   );
 }
 

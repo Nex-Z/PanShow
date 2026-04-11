@@ -1,4 +1,4 @@
-import type { APIError, DirectoryPassword, FileEntry, User } from "../types";
+import type { Announcement, APIError, DirectoryPassword, FileEntry, PublicAnnouncement, User } from "../types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
 const AUTH_TOKEN_KEY = "panshow_auth_token";
@@ -66,12 +66,11 @@ export const api = {
     }
   },
   me: () => request<{ user: User }>("/api/auth/me"),
-  listFiles: (path: string, includeReadme = false) =>
-    request<{ path: string; entries: FileEntry[]; readme?: string }>(
-      `/api/files?path=${queryPath(path)}${includeReadme ? "&includeReadme=true" : ""}`
+  listFiles: (path: string) =>
+    request<{ path: string; entries: FileEntry[]; announcements?: PublicAnnouncement[] }>(
+      `/api/files?path=${queryPath(path)}`
     ),
   fileDetail: (path: string) => request<{ file: FileEntry }>(`/api/files/detail?path=${queryPath(path)}`),
-  readme: (path: string) => request<{ path: string; content: string }>(`/api/readme?path=${queryPath(path)}`),
   download: (path: string) => request<{ url: string; expiresIn: number }>(`/api/files/download?path=${queryPath(path)}`),
   preview: (path: string) => request<{ url: string; expiresIn: number }>(`/api/files/preview?path=${queryPath(path)}`),
   refreshFileCache: (path: string) =>
@@ -98,5 +97,20 @@ export const api = {
       body
     }),
   disableDirectoryPassword: (id: number) =>
-    request<{ ok: boolean }>(`/api/admin/directory-passwords/${id}`, { method: "DELETE" })
+    request<{ ok: boolean }>(`/api/admin/directory-passwords/${id}`, { method: "DELETE" }),
+  listAnnouncements: () => request<{ announcements: Announcement[] }>("/api/admin/announcements"),
+  createAnnouncement: (body: { title: string; pattern: string; content: string; enabled: boolean; sortOrder: number }) =>
+    request<{ announcement: Announcement }>("/api/admin/announcements", { method: "POST", body }),
+  updateAnnouncement: (
+    id: number,
+    body: Partial<Pick<Announcement, "title" | "pattern" | "content" | "enabled" | "sortOrder">>
+  ) =>
+    request<{ announcement: Announcement }>(`/api/admin/announcements/${id}`, {
+      method: "PATCH",
+      body
+    }),
+  deleteAnnouncement: (id: number) =>
+    request<{ ok: boolean }>(`/api/admin/announcements/${id}`, { method: "DELETE" }),
+  refreshAnnouncementCache: () =>
+    request<{ ok: boolean }>("/api/admin/announcements/cache/refresh", { method: "POST" })
 };

@@ -57,7 +57,8 @@ body {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
@@ -71,13 +72,20 @@ button:disabled {
 }
 
 input,
-select {
+select,
+textarea {
   width: 100%;
   border: 1px solid #cfd8d2;
   border-radius: 8px;
   background: #ffffff;
   color: #17201b;
   padding: 0.72rem 0.8rem;
+}
+
+textarea {
+  min-height: 180px;
+  resize: vertical;
+  line-height: 1.6;
 }
 
 label {
@@ -202,7 +210,7 @@ p {
 }
 
 .browser-pane,
-.readme-pane,
+.announcement-pane,
 .login-panel,
 .admin-panel,
 .access-panel {
@@ -212,7 +220,7 @@ p {
 }
 
 .browser-pane,
-.readme-pane,
+.announcement-pane,
 .admin-panel,
 .access-panel {
   padding: 22px;
@@ -346,8 +354,44 @@ p {
   border: 0;
 }
 
-.readme-pane {
+.announcement-pane {
   align-self: stretch;
+  display: grid;
+  gap: 0.9rem;
+}
+
+.announcement-pane > h2 {
+  margin: 0;
+  color: #1890ff;
+  font-size: 1rem;
+  font-weight: 800;
+  line-height: 1.3;
+}
+
+.announcement-stack {
+  display: grid;
+  gap: 1.1rem;
+  max-height: min(520px, 60vh);
+  overflow: auto;
+  padding-right: 0.3rem;
+}
+
+.announcement-entry {
+  display: grid;
+  gap: 0.75rem;
+  border-top: 1px solid #edf1ee;
+  padding-top: 1rem;
+}
+
+.announcement-entry:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.announcement-title,
+.announcement-edit-grid {
+  display: grid;
+  gap: 0.5rem;
 }
 
 .file-detail,
@@ -373,21 +417,161 @@ p {
 }
 
 .markdown {
-  color: #e1f0ff;
+  color: #17201b;
   line-height: 1.7;
+  overflow-wrap: anywhere;
+  overflow-x: auto;
+}
+
+.markdown > :first-child {
+  margin-top: 0;
+}
+
+.markdown > :last-child {
+  margin-bottom: 0;
 }
 
 .markdown h1,
 .markdown h2,
+.markdown h3,
+.markdown h4,
+.markdown h5,
+.markdown h6 {
+  color: #17201b;
+  font-weight: 800;
+  line-height: 1.25;
+}
+
+.markdown h1 {
+  margin: 1.1rem 0 0.7rem;
+  font-size: 1.65rem;
+}
+
+.markdown h2 {
+  margin: 1rem 0 0.65rem;
+  font-size: 1.38rem;
+}
+
 .markdown h3 {
-  margin: 1rem 0 0.5rem;
+  margin: 0.9rem 0 0.55rem;
+  font-size: 1.16rem;
+}
+
+.markdown h4,
+.markdown h5,
+.markdown h6 {
+  margin: 0.8rem 0 0.45rem;
+  font-size: 1rem;
 }
 
 .markdown p,
 .markdown ul,
 .markdown ol,
-.markdown pre {
+.markdown blockquote,
+.markdown pre,
+.markdown table {
   margin: 0.7rem 0;
+}
+
+.markdown ul,
+.markdown ol {
+  padding-left: 1.45rem;
+}
+
+.markdown ul {
+  list-style: disc;
+}
+
+.markdown ol {
+  list-style: decimal;
+}
+
+.markdown li {
+  margin: 0.25rem 0;
+}
+
+.markdown li > p {
+  margin: 0.35rem 0;
+}
+
+.markdown a {
+  color: #1890ff;
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 0.18em;
+}
+
+.markdown strong {
+  font-weight: 800;
+}
+
+.markdown blockquote {
+  border-left: 3px solid #1890ff;
+  color: #526158;
+  padding: 0.15rem 0 0.15rem 0.9rem;
+}
+
+.markdown code {
+  border-radius: 6px;
+  background: #f0f5f2;
+  color: #17201b;
+  padding: 0.12rem 0.3rem;
+  font-family: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+  font-size: 0.92em;
+}
+
+.markdown pre {
+  border: 1px solid #d7dfda;
+  border-radius: 8px;
+  background: #f6f8f5;
+  padding: 0.9rem;
+  overflow: auto;
+}
+
+.markdown pre code {
+  display: block;
+  background: transparent;
+  padding: 0;
+}
+
+.markdown table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.95rem;
+}
+
+.markdown th,
+.markdown td {
+  border: 1px solid #d7dfda;
+  padding: 0.55rem 0.65rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.markdown th {
+  background: #f0f5f2;
+  font-weight: 800;
+}
+
+.markdown hr {
+  border: 0;
+  border-top: 1px solid #d7dfda;
+  margin: 1rem 0;
+}
+
+.markdown img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 8px;
+}
+
+.markdown input[type="checkbox"] {
+  width: auto;
+  margin-right: 0.45rem;
+}
+
+.markdown-preview .markdown {
+  margin-top: 0.85rem;
 }
 
 .login-screen,
@@ -428,11 +612,18 @@ p {
   margin-bottom: 18px;
 }
 
-.admin-grid {
+.admin-layout {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(280px, 0.34fr) minmax(0, 1fr);
   gap: 22px;
   position: relative;
+  align-items: start;
+}
+
+.admin-sidebar,
+.admin-main {
+  display: grid;
+  gap: 22px;
 }
 
 .admin-panel {
@@ -441,15 +632,66 @@ p {
   gap: 1rem;
 }
 
-.admin-panel.wide {
+.status-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.75rem;
+}
+
+.admin-form {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.compact-form,
+.directory-form {
+  grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+  align-items: end;
+}
+
+.compact-form {
+  grid-template-columns: 1fr;
+}
+
+.announcement-form {
+  grid-template-columns: minmax(140px, 1fr) minmax(180px, 1.4fr) 120px auto;
+  align-items: end;
+}
+
+.announcement-form textarea {
   grid-column: 1 / -1;
 }
 
-.status-grid,
-.inline-form {
+.announcement-form .button {
+  justify-self: start;
+}
+
+.announcement-row {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 0.75rem;
+  gap: 0.9rem;
+  border-top: 1px solid #edf1ee;
+  padding: 1rem 0;
+}
+
+.announcement-row:first-child {
+  border-top: 0;
+}
+
+.announcement-edit-grid {
+  grid-template-columns: minmax(140px, 1fr) minmax(180px, 1.4fr) 100px auto;
+  align-items: end;
+}
+
+.markdown-preview {
+  border: 1px dashed #cbd8d1;
+  border-radius: 8px;
+  padding: 0.85rem;
+}
+
+.markdown-preview summary {
+  color: #1890ff;
+  cursor: pointer;
+  font-weight: 750;
 }
 
 .config-list {
@@ -498,12 +740,17 @@ p {
 
   .topbar,
   .workspace,
-  .admin-grid {
+  .admin-layout,
+  .admin-sidebar,
+  .admin-main {
     grid-template-columns: 1fr;
   }
 
   .rule-row,
-  .rule-fields {
+  .rule-fields,
+  .announcement-form,
+  .announcement-edit-grid,
+  .directory-form {
     grid-template-columns: 1fr;
   }
 
@@ -511,12 +758,11 @@ p {
     display: grid;
   }
 
-  .readme-pane {
+  .announcement-pane {
     min-height: 220px;
   }
 
   .status-grid,
-  .inline-form,
   .data-row,
   .config-list div {
     grid-template-columns: 1fr;

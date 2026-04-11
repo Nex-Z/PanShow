@@ -27,6 +27,19 @@ export type DirectoryPassword = {
   updatedAt: string;
 };
 
+export type Announcement = {
+  id: number;
+  title: string;
+  pattern: string;
+  content: string;
+  enabled: boolean;
+  sortOrder: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type PublicAnnouncement = Pick<Announcement, "id" | "title" | "content" | "sortOrder">;
+
 export type APIError = {
   code: string;
   message: string;
