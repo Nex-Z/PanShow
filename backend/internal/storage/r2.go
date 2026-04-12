@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"mime"
+	"net/url"
 	"path"
 	"strings"
 	"time"
@@ -115,11 +116,38 @@ func (c *Client) Stat(ctx context.Context, filePath string) (FileEntry, error) {
 }
 
 func (c *Client) PresignDownload(ctx context.Context, filePath string, ttl time.Duration) (string, error) {
-	return c.presignGetObject(ctx, filePath, ttl, fmt.Sprintf("attachment; filename=%q", path.Base(filePath)))
+	return c.presignGetObject(ctx, filePath, ttl, downloadContentDisposition(filePath))
 }
 
 func (c *Client) PresignPreview(ctx context.Context, filePath string, ttl time.Duration) (string, error) {
 	return c.presignGetObject(ctx, filePath, ttl, "inline")
+}
+
+func downloadContentDisposition(filePath string) string {
+	filename := path.Base(filePath)
+	if filename == "" || filename == "." || filename == "/" {
+		filename = "download"
+	}
+	return fmt.Sprintf("attachment; filename=%q; filename*=UTF-8''%s", fallbackDownloadFilename(filename), url.PathEscape(filename))
+}
+
+func fallbackDownloadFilename(filename string) string {
+	var builder strings.Builder
+	for _, r := range filename {
+		switch {
+		case r == '"' || r == '\\' || r == '/' || r == '\r' || r == '\n':
+			builder.WriteByte('_')
+		case r >= 0x20 && r <= 0x7e:
+			builder.WriteRune(r)
+		default:
+			builder.WriteByte('_')
+		}
+	}
+	fallback := strings.TrimSpace(builder.String())
+	if fallback == "" || fallback == "." || fallback == ".." {
+		return "download"
+	}
+	return fallback
 }
 
 func (c *Client) presignGetObject(ctx context.Context, filePath string, ttl time.Duration, disposition string) (string, error) {
