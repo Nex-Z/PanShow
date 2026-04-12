@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronLeftIcon,
   ChevronRightIcon,
@@ -136,7 +136,10 @@ function LoginPage({ onLogin }: { onLogin: (user: User) => void }) {
 }
 
 function FileBrowser() {
-  const initialRoute = useMemo(() => parseR2Route(window.location.pathname), []);
+  const initialPathname = useMemo(() => window.location.pathname, []);
+  const initialNotFoundPath = useMemo(() => frontendNotFoundPath(initialPathname), [initialPathname]);
+  const initialRoute = useMemo(() => parseR2Route(initialPathname), [initialPathname]);
+  const [notFoundPath, setNotFoundPath] = useState(initialNotFoundPath);
   const [route, setRoute] = useState<R2Route>(initialRoute);
   const [routeHistory, setRouteHistory] = useState<RouteHistoryState>(() => ({ entries: [initialRoute], index: 0 }));
   const [entries, setEntries] = useState<FileEntry[]>([]);
@@ -149,6 +152,14 @@ function FileBrowser() {
   const currentPath = route.path;
   const canGoBack = routeHistory.index > 0;
   const canGoForward = routeHistory.index < routeHistory.entries.length - 1;
+
+  const goHome = useCallback(() => {
+    const homeRoute: R2Route = { kind: "directory", path: "/" };
+    window.history.replaceState(null, "", toR2BrowserPath(homeRoute));
+    setNotFoundPath("");
+    setRoute(homeRoute);
+    setRouteHistory({ entries: [homeRoute], index: 0 });
+  }, []);
 
   const navigateTo = useCallback(
     (nextRoute: R2Route) => {
@@ -192,8 +203,11 @@ function FileBrowser() {
     } catch (err) {
       if (err instanceof RequestError && err.error.code === "directory_password_required") {
         setRequiredPaths(err.error.requiredPaths ?? []);
+        setAnnouncements(err.error.announcements ?? []);
+        setEntries([]);
         setRoute(nextRoute);
       } else {
+        setAnnouncements([]);
         setError(err instanceof RequestError ? err.error.message : "读取路径失败");
       }
     } finally {
@@ -202,13 +216,22 @@ function FileBrowser() {
   }, []);
 
   useEffect(() => {
+    if (notFoundPath) {
+      return;
+    }
     void load(route);
-  }, [route, load]);
+  }, [route, load, notFoundPath]);
 
   useEffect(() => {
     function handlePopState() {
+      const nextNotFoundPath = frontendNotFoundPath(window.location.pathname);
       const nextRoute = parseR2Route(window.location.pathname);
+      setNotFoundPath(nextNotFoundPath);
       setRoute(nextRoute);
+      if (nextNotFoundPath) {
+        setRouteHistory({ entries: [nextRoute], index: 0 });
+        return;
+      }
       setRouteHistory((history) => syncRouteHistory(history, nextRoute));
     }
     window.addEventListener("popstate", handlePopState);
@@ -242,6 +265,10 @@ function FileBrowser() {
     } catch (err) {
       setError(err instanceof RequestError ? err.error.message : "刷新失败");
     }
+  }
+
+  if (notFoundPath) {
+    return <NotFoundPage path={notFoundPath} onHome={goHome} />;
   }
 
   return (
@@ -355,19 +382,93 @@ function FileDetail({ file, onDownload, onPreview }: { file: FileEntry; onDownlo
 function AnnouncementPane({ announcements }: { announcements: PublicAnnouncement[] }) {
   return (
     <aside className="announcement-pane">
-      <h2>公告</h2>
+      <div className="announcement-heading">
+        <h2>公告</h2>
+      </div>
       <div className="announcement-stack">
         {announcements.map((announcement) => (
-          <article className="announcement-entry" key={announcement.id}>
-            <div className="markdown">
-              <ReactMarkdown remarkPlugins={markdownPlugins} skipHtml>
-                {announcement.content}
-              </ReactMarkdown>
-            </div>
-          </article>
+          <AnnouncementEntry announcement={announcement} key={announcement.id} />
         ))}
       </div>
     </aside>
+  );
+}
+
+function AnnouncementEntry({ announcement }: { announcement: PublicAnnouncement }) {
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [collapsible, setCollapsible] = useState(false);
+
+  const measure = useCallback(() => {
+    const body = bodyRef.current;
+    if (!body) {
+      return;
+    }
+    const styles = window.getComputedStyle(body);
+    const fontSize = Number.parseFloat(styles.fontSize);
+    const lineHeight = Number.parseFloat(styles.lineHeight) || fontSize * 1.7;
+    setCollapsible(body.scrollHeight > lineHeight * 3 + 2);
+  }, []);
+
+  useEffect(() => {
+    setExpanded(false);
+  }, [announcement.content]);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(measure);
+    const body = bodyRef.current;
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    if (body) {
+      observer?.observe(body);
+    }
+    window.addEventListener("resize", measure);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      observer?.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+  }, [announcement.content, measure]);
+
+  return (
+    <article className={`announcement-entry ${collapsible ? "collapsible" : ""} ${expanded ? "expanded" : "collapsed"}`}>
+      <div className="markdown announcement-body" ref={bodyRef}>
+        <ReactMarkdown remarkPlugins={markdownPlugins} skipHtml>
+          {announcement.content}
+        </ReactMarkdown>
+      </div>
+      {collapsible ? (
+        <button className="link-button announcement-toggle" type="button" onClick={() => setExpanded((value) => !value)}>
+          {expanded ? "收起" : "展开"}
+        </button>
+      ) : null}
+    </article>
+  );
+}
+
+function NotFoundPage({ path, onHome }: { path: string; onHome: () => void }) {
+  const [secondsLeft, setSecondsLeft] = useState(3);
+
+  useEffect(() => {
+    setSecondsLeft(3);
+    const interval = window.setInterval(() => {
+      setSecondsLeft((value) => Math.max(0, value - 1));
+    }, 1000);
+    const timeout = window.setTimeout(onHome, 3000);
+    return () => {
+      window.clearInterval(interval);
+      window.clearTimeout(timeout);
+    };
+  }, [path, onHome]);
+
+  return (
+    <section className="not-found-panel">
+      <p className="eyebrow">404</p>
+      <h2>这个页面走丢了</h2>
+      <p className="muted">{path} 暂时没有可展示的内容，{secondsLeft} 秒后回到首页。</p>
+      <button className="button primary" type="button" onClick={onHome}>
+        回到首页
+      </button>
+    </section>
   );
 }
 
@@ -511,7 +612,7 @@ function AdminPanel() {
     const form = new FormData(formElement);
     await runAdminAction("公告已发布", async () => {
       await api.createAnnouncement({
-        title: String(form.get("title")),
+        title: "",
         pattern: String(form.get("pattern")),
         content: String(form.get("content")),
         enabled: form.get("enabled") === "on",
@@ -608,7 +709,6 @@ function AdminPanel() {
             </button>
           </div>
           <form className="admin-form announcement-form" onSubmit={(event) => void createAnnouncement(event)}>
-            <input name="title" placeholder="标题" defaultValue="公告" />
             <input name="pattern" placeholder="/ 或 /docs/**" defaultValue="/**" required />
             <input name="sortOrder" placeholder="排序" type="number" defaultValue={100} />
             <label className="checkbox-label">
@@ -663,14 +763,12 @@ function AnnouncementRow({
   ) => Promise<void>;
   onDelete: (id: number) => Promise<void>;
 }) {
-  const [title, setTitle] = useState(announcement.title);
   const [pattern, setPattern] = useState(announcement.pattern);
   const [content, setContent] = useState(announcement.content);
   const [enabled, setEnabled] = useState(announcement.enabled);
   const [sortOrder, setSortOrder] = useState(announcement.sortOrder);
 
   useEffect(() => {
-    setTitle(announcement.title);
     setPattern(announcement.pattern);
     setContent(announcement.content);
     setEnabled(announcement.enabled);
@@ -678,16 +776,12 @@ function AnnouncementRow({
   }, [announcement]);
 
   async function handleSave() {
-    await onUpdate(announcement.id, { title, pattern, content, enabled, sortOrder });
+    await onUpdate(announcement.id, { pattern, content, enabled, sortOrder });
   }
 
   return (
     <article className="announcement-row">
       <div className="announcement-edit-grid">
-        <label>
-          标题
-          <input value={title} onChange={(event) => setTitle(event.target.value)} />
-        </label>
         <label>
           目录规则
           <input value={pattern} onChange={(event) => setPattern(event.target.value)} />
@@ -820,8 +914,11 @@ function ShellState({ title, message }: { title: string; message: string }) {
 
 function parseR2Route(pathname: string): R2Route {
   const prefix = "/r2";
-  if (!pathname.startsWith(prefix)) {
+  if (pathname === "" || pathname === "/") {
     window.history.replaceState(null, "", "/r2/");
+    return { kind: "directory", path: "/" };
+  }
+  if (!isR2BrowserPath(pathname)) {
     return { kind: "directory", path: "/" };
   }
   const trailingSlash = pathname.endsWith("/");
@@ -831,6 +928,17 @@ function parseR2Route(pathname: string): R2Route {
     return { kind: "file", path };
   }
   return { kind: "directory", path };
+}
+
+function frontendNotFoundPath(pathname: string) {
+  if (pathname === "" || pathname === "/" || isR2BrowserPath(pathname)) {
+    return "";
+  }
+  return safeDecodeURI(pathname);
+}
+
+function isR2BrowserPath(pathname: string) {
+  return pathname === "/r2" || pathname.startsWith("/r2/");
 }
 
 function safeDecodeURI(value: string) {

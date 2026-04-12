@@ -44,4 +44,5 @@ export type APIError = {
   code: string;
   message: string;
   requiredPaths?: string[];
+  announcements?: PublicAnnouncement[];
 };

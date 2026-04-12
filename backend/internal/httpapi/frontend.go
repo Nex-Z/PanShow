@@ -37,8 +37,12 @@ func (api *API) registerFrontend(router *gin.Engine) {
 			c.Status(http.StatusNotFound)
 			return
 		}
+		if isFrontendAppRoute(requestPath) {
+			serveFrontendIndex(c, dist)
+			return
+		}
 
-		serveFrontendIndex(c, dist)
+		serveFrontendIndexWithStatus(c, dist, http.StatusNotFound)
 	})
 }
 
@@ -51,6 +55,10 @@ func cleanFrontendPath(rawPath string) string {
 
 func isBackendRoute(requestPath string) bool {
 	return requestPath == "/api" || strings.HasPrefix(requestPath, "/api/") || requestPath == "/healthz"
+}
+
+func isFrontendAppRoute(requestPath string) bool {
+	return requestPath == "/" || requestPath == "/r2" || strings.HasPrefix(requestPath, "/r2/")
 }
 
 func serveFrontendFile(c *gin.Context, dist fs.FS, requestPath string) bool {
@@ -67,12 +75,20 @@ func serveFrontendFile(c *gin.Context, dist fs.FS, requestPath string) bool {
 }
 
 func serveFrontendIndex(c *gin.Context, dist fs.FS) {
+	serveFrontendIndexWithStatus(c, dist, http.StatusOK)
+}
+
+func serveFrontendIndexWithStatus(c *gin.Context, dist fs.FS, status int) {
 	info, err := fs.Stat(dist, "index.html")
 	if err != nil || info.IsDir() {
 		c.Status(http.StatusNotFound)
 		return
 	}
-	serveFrontendContent(c, dist, "index.html", info)
+	if status == http.StatusOK {
+		serveFrontendContent(c, dist, "index.html", info)
+		return
+	}
+	serveFrontendContentWithStatus(c, dist, "index.html", status)
 }
 
 func serveFrontendContent(c *gin.Context, dist fs.FS, name string, info fs.FileInfo) {
@@ -85,4 +101,20 @@ func serveFrontendContent(c *gin.Context, dist fs.FS, name string, info fs.FileI
 		c.Header("Content-Type", contentType)
 	}
 	http.ServeContent(c.Writer, c.Request, name, info.ModTime(), bytes.NewReader(content))
+}
+
+func serveFrontendContentWithStatus(c *gin.Context, dist fs.FS, name string, status int) {
+	content, err := fs.ReadFile(dist, name)
+	if err != nil {
+		c.Status(http.StatusInternalServerError)
+		return
+	}
+	if contentType := mime.TypeByExtension(path.Ext(name)); contentType != "" {
+		c.Header("Content-Type", contentType)
+	}
+	c.Writer.WriteHeader(status)
+	if c.Request.Method == http.MethodHead {
+		return
+	}
+	_, _ = c.Writer.Write(content)
 }

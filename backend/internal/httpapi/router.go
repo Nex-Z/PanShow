@@ -193,17 +193,32 @@ func (api *API) listFiles(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if !api.ensureDirectoryAccess(c, dir) {
-		return
-	}
 	announcementCtx, cancelAnnouncements := context.WithCancel(c.Request.Context())
 	defer cancelAnnouncements()
 	announcementsCh := api.startAnnouncementsLoad(announcementCtx, dir)
+	var announcementsResult *announcementsLoadResult
+	loadAnnouncements := func() announcementsLoadResult {
+		if announcementsResult != nil {
+			return *announcementsResult
+		}
+		result := <-announcementsCh
+		announcementsResult = &result
+		return result
+	}
+	if !api.ensureDirectoryAccess(c, dir, func() gin.H {
+		result := loadAnnouncements()
+		if result.err != nil {
+			return nil
+		}
+		return gin.H{"announcements": result.announcements}
+	}) {
+		return
+	}
 
 	cacheKey := listCacheKey(dir)
 	var cached filesResponse
 	if api.cachedJSON(c, cacheKey, &cached) {
-		result := <-announcementsCh
+		result := loadAnnouncements()
 		if result.err != nil {
 			writeError(c, http.StatusInternalServerError, "announcement_error", "读取公告失败")
 			return
@@ -219,7 +234,7 @@ func (api *API) listFiles(c *gin.Context) {
 	}
 	response := filesResponse{Path: dir, Entries: entries}
 	api.storeCachedJSON(c, cacheKey, response)
-	result := <-announcementsCh
+	result := loadAnnouncements()
 	if result.err != nil {
 		writeError(c, http.StatusInternalServerError, "announcement_error", "读取公告失败")
 		return
@@ -869,7 +884,7 @@ func (api *API) loginUsernameFailureScope(username string) [2]string {
 	return [2]string{"username", username}
 }
 
-func (api *API) ensureDirectoryAccess(c *gin.Context, dir string) bool {
+func (api *API) ensureDirectoryAccess(c *gin.Context, dir string, forbiddenExtras ...func() gin.H) bool {
 	if currentUser(c).Role == model.RoleAdmin {
 		return true
 	}
@@ -904,13 +919,20 @@ func (api *API) ensureDirectoryAccess(c *gin.Context, dir string) bool {
 	for i, ok := range passed {
 		if !ok {
 			rule := rules[i]
-			writeJSON(c, http.StatusForbidden, gin.H{
-				"error": gin.H{
-					"code":          "directory_password_required",
-					"message":       "需要目录密码",
-					"requiredPaths": []string{rule.Path},
-				},
-			})
+			errorPayload := gin.H{
+				"code":          "directory_password_required",
+				"message":       "需要目录密码",
+				"requiredPaths": []string{rule.Path},
+			}
+			for _, extra := range forbiddenExtras {
+				if extra == nil {
+					continue
+				}
+				for key, value := range extra() {
+					errorPayload[key] = value
+				}
+			}
+			writeJSON(c, http.StatusForbidden, gin.H{"error": errorPayload})
 			return false
 		}
 	}
@@ -1042,7 +1064,7 @@ func buildAnnouncementFromRequest(c *gin.Context, title, pattern, content string
 func cleanAnnouncementTitle(title string) string {
 	title = strings.TrimSpace(title)
 	if title == "" {
-		return "公告"
+		return ""
 	}
 	runes := []rune(title)
 	if len(runes) > 160 {

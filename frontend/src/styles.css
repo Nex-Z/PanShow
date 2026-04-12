@@ -400,7 +400,13 @@ p {
   gap: 0.9rem;
 }
 
-.announcement-pane > h2 {
+.announcement-heading {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.announcement-heading h2 {
   margin: 0;
   color: #1890ff;
   font-size: 1rem;
@@ -411,9 +417,6 @@ p {
 .announcement-stack {
   display: grid;
   gap: 1.1rem;
-  max-height: min(520px, 60vh);
-  overflow: auto;
-  padding-right: 0.3rem;
 }
 
 .announcement-entry {
@@ -423,9 +426,72 @@ p {
   padding-top: 1rem;
 }
 
+.announcement-entry.collapsible {
+  position: relative;
+  padding-right: 4.6rem;
+}
+
 .announcement-entry:first-child {
   border-top: 0;
   padding-top: 0;
+}
+
+.announcement-body {
+  position: relative;
+}
+
+.announcement-entry.collapsed.collapsible .announcement-body {
+  max-height: 5.1em;
+  overflow: hidden;
+  padding-right: 1.35rem;
+}
+
+.announcement-entry.collapsed.collapsible .announcement-body::after {
+  content: "...";
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  min-width: 2rem;
+  padding-left: 0.8rem;
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0), #ffffff 42%);
+  color: #526158;
+  font-weight: 800;
+  text-align: right;
+}
+
+.announcement-toggle {
+  position: absolute;
+  top: 1rem;
+  right: 0;
+}
+
+.announcement-entry:first-child .announcement-toggle {
+  top: 0;
+}
+
+.not-found-panel {
+  min-height: min(420px, 70vh);
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 1rem;
+  border: 1px dashed #cbd8d1;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 32px;
+  text-align: center;
+}
+
+.not-found-panel h2 {
+  margin: 0;
+  color: #17201b;
+  font-size: clamp(2rem, 7vw, 3.4rem);
+  line-height: 1;
+}
+
+.not-found-panel .muted {
+  max-width: 620px;
+  overflow-wrap: anywhere;
 }
 
 .announcement-title,
@@ -731,7 +797,7 @@ p {
 }
 
 .announcement-form {
-  grid-template-columns: minmax(140px, 1fr) minmax(180px, 1.4fr) 120px auto;
+  grid-template-columns: minmax(180px, 1.4fr) 120px auto;
   align-items: end;
 }
 
@@ -755,7 +821,7 @@ p {
 }
 
 .announcement-edit-grid {
-  grid-template-columns: minmax(140px, 1fr) minmax(180px, 1.4fr) 100px auto;
+  grid-template-columns: minmax(180px, 1.4fr) 100px auto;
   align-items: end;
 }
 
@@ -835,9 +901,6 @@ p {
     display: grid;
   }
 
-  .announcement-pane {
-    min-height: 220px;
-  }
 
   .status-grid,
   .data-row,
