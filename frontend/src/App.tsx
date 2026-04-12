@@ -1,5 +1,14 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
-import { DownloadIcon, EyeIcon, FileIcon, FolderIcon, RefreshCwIcon } from "lucide-react";
+import {
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  DownloadIcon,
+  EyeIcon,
+  EyeOffIcon,
+  FileIcon,
+  FolderIcon,
+  RefreshCwIcon
+} from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api, RequestError } from "./api/client";
@@ -7,6 +16,7 @@ import type { Announcement, DirectoryPassword, FileEntry, PublicAnnouncement, Us
 
 type View = "files" | "admin" | "login";
 type R2Route = { kind: "directory"; path: string } | { kind: "file"; path: string };
+type RouteHistoryState = { entries: R2Route[]; index: number };
 
 const markdownPlugins = [remarkGfm];
 
@@ -126,7 +136,9 @@ function LoginPage({ onLogin }: { onLogin: (user: User) => void }) {
 }
 
 function FileBrowser() {
-  const [route, setRoute] = useState<R2Route>(() => parseR2Route(window.location.pathname));
+  const initialRoute = useMemo(() => parseR2Route(window.location.pathname), []);
+  const [route, setRoute] = useState<R2Route>(initialRoute);
+  const [routeHistory, setRouteHistory] = useState<RouteHistoryState>(() => ({ entries: [initialRoute], index: 0 }));
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [file, setFile] = useState<FileEntry | null>(null);
   const [announcements, setAnnouncements] = useState<PublicAnnouncement[]>([]);
@@ -135,11 +147,31 @@ function FileBrowser() {
   const [loading, setLoading] = useState(false);
 
   const currentPath = route.path;
+  const canGoBack = routeHistory.index > 0;
+  const canGoForward = routeHistory.index < routeHistory.entries.length - 1;
 
-  const navigateTo = useCallback((nextRoute: R2Route) => {
-    window.history.pushState(null, "", toR2BrowserPath(nextRoute));
-    setRoute(nextRoute);
-  }, []);
+  const navigateTo = useCallback(
+    (nextRoute: R2Route) => {
+      if (routesEqual(route, nextRoute)) {
+        return;
+      }
+      window.history.pushState(null, "", toR2BrowserPath(nextRoute));
+      setRoute(nextRoute);
+      setRouteHistory((history) => appendRouteHistory(history, nextRoute));
+    },
+    [route]
+  );
+
+  const stepRouteHistory = useCallback(
+    (offset: -1 | 1) => {
+      const nextIndex = routeHistory.index + offset;
+      if (nextIndex < 0 || nextIndex >= routeHistory.entries.length) {
+        return;
+      }
+      window.history.go(offset);
+    },
+    [routeHistory]
+  );
 
   const load = useCallback(async (nextRoute: R2Route) => {
     setLoading(true);
@@ -175,7 +207,9 @@ function FileBrowser() {
 
   useEffect(() => {
     function handlePopState() {
-      setRoute(parseR2Route(window.location.pathname));
+      const nextRoute = parseR2Route(window.location.pathname);
+      setRoute(nextRoute);
+      setRouteHistory((history) => syncRouteHistory(history, nextRoute));
     }
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
@@ -216,13 +250,35 @@ function FileBrowser() {
       <div className="browser-pane">
         <div className="browser-tools">
           <div className="breadcrumbs" aria-label="路径导航">
-            {breadcrumbs.map((item) => (
-              <button className="link-button" key={item.path} onClick={() => navigateTo({ kind: "directory", path: item.path })}>
-                {item.label}
+            <div className="breadcrumb-history" aria-label="浏览历史">
+              <button
+                className="history-button"
+                type="button"
+                onClick={() => stepRouteHistory(-1)}
+                disabled={!canGoBack}
+                aria-label="后退"
+              >
+                <ChevronLeftIcon aria-hidden />
               </button>
-            ))}
+              <button
+                className="history-button"
+                type="button"
+                onClick={() => stepRouteHistory(1)}
+                disabled={!canGoForward}
+                aria-label="前进"
+              >
+                <ChevronRightIcon aria-hidden />
+              </button>
+            </div>
+            <div className="breadcrumb-trail">
+              {breadcrumbs.map((item) => (
+                <button className="link-button" key={item.path} onClick={() => navigateTo({ kind: "directory", path: item.path })}>
+                  {item.label}
+                </button>
+              ))}
+            </div>
           </div>
-          {route.kind === "directory" ? (
+          {route.kind === "directory" && requiredPaths.length === 0 ? (
             <button className="link-button" onClick={() => void handleRefresh()}>
               <RefreshCwIcon aria-hidden />
             </button>
@@ -272,16 +328,8 @@ function FileDetail({ file, onDownload, onPreview }: { file: FileEntry; onDownlo
       <h3>{file.name}</h3>
       <dl className="config-list">
         <div>
-          <dt>路径</dt>
-          <dd>{file.path}</dd>
-        </div>
-        <div>
           <dt>大小</dt>
           <dd>{formatSize(file.size)}</dd>
-        </div>
-        <div>
-          <dt>类型</dt>
-          <dd>{file.contentType || "未知"}</dd>
         </div>
         <div>
           <dt>更新时间</dt>
@@ -337,6 +385,7 @@ function DirectoryPasswordPrompt({ paths, onPassed }: { paths: string[]; onPasse
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
   const path = paths[0] ?? "/";
 
   async function handleSubmit(event: FormEvent) {
@@ -357,7 +406,22 @@ function DirectoryPasswordPrompt({ paths, onPassed }: { paths: string[]; onPasse
     <form className="access-panel" onSubmit={handleSubmit}>
       <h3>需要目录密码</h3>
       <p className="muted">这里包含受保护内容，请输入密码。</p>
-      <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} />
+      <div className="password-input-wrap">
+        <input
+          type={showPassword ? "text" : "password"}
+          value={password}
+          onChange={(event) => setPassword(event.target.value)}
+          autoComplete="current-password"
+        />
+        <button
+          className="password-toggle"
+          type="button"
+          onClick={() => setShowPassword((value) => !value)}
+          aria-label={showPassword ? "隐藏密码" : "显示密码"}
+        >
+          {showPassword ? <EyeOffIcon aria-hidden /> : <EyeIcon aria-hidden />}
+        </button>
+      </div>
       {error ? <p className="error-text">{error}</p> : null}
       <button className="button primary" disabled={submitting}>
         {submitting ? "验证中" : "验证"}
@@ -795,6 +859,36 @@ function normalizeBrowserPath(raw: string) {
 function hasFileExtension(path: string) {
   const name = path.split("/").filter(Boolean).at(-1) ?? "";
   return /\.[^/.]+$/.test(name);
+}
+
+function routesEqual(left: R2Route, right: R2Route) {
+  return left.kind === right.kind && left.path === right.path;
+}
+
+function appendRouteHistory(history: RouteHistoryState, nextRoute: R2Route): RouteHistoryState {
+  const currentRoute = history.entries[history.index];
+  if (currentRoute && routesEqual(currentRoute, nextRoute)) {
+    return history;
+  }
+  const entries = history.entries.slice(0, history.index + 1);
+  entries.push(nextRoute);
+  return { entries, index: entries.length - 1 };
+}
+
+function syncRouteHistory(history: RouteHistoryState, nextRoute: R2Route): RouteHistoryState {
+  const currentRoute = history.entries[history.index];
+  if (currentRoute && routesEqual(currentRoute, nextRoute)) {
+    return history;
+  }
+  const previousIndex = history.index - 1;
+  const nextIndex = history.index + 1;
+  if (previousIndex >= 0 && routesEqual(history.entries[previousIndex], nextRoute)) {
+    return { ...history, index: previousIndex };
+  }
+  if (nextIndex < history.entries.length && routesEqual(history.entries[nextIndex], nextRoute)) {
+    return { ...history, index: nextIndex };
+  }
+  return { entries: [nextRoute], index: 0 };
 }
 
 function buildBreadcrumbs(route: R2Route) {

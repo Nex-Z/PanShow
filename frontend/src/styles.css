@@ -237,11 +237,51 @@ p {
 
 .breadcrumbs {
   display: flex;
+  align-items: center;
   flex-wrap: wrap;
   gap: 0.65rem;
+  min-width: 0;
 }
 
-.breadcrumbs .link-button::after {
+.breadcrumb-history,
+.breadcrumb-trail {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  min-width: 0;
+}
+
+.breadcrumb-history {
+  gap: 0.35rem;
+}
+
+.history-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: 1px solid #d7dfda;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #1890ff;
+}
+
+.history-button svg {
+  width: 1rem;
+  height: 1rem;
+}
+
+.history-button:disabled {
+  cursor: not-allowed;
+  border-color: #edf1ee;
+  background: #f7faf7;
+  color: #9aa8a0;
+}
+
+.breadcrumb-trail .link-button::after {
   content: "/";
   color: #1890ff;
   margin-left: 0.65rem;
@@ -610,6 +650,43 @@ p {
 
 .access-panel {
   margin-bottom: 18px;
+}
+.password-input-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.password-input-wrap input {
+  padding-right: 3rem;
+}
+
+.password-toggle {
+  position: absolute;
+  right: 0.45rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.2rem;
+  height: 2.2rem;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #1890ff;
+}
+
+.password-toggle svg {
+  width: 1rem;
+  height: 1rem;
+}
+
+.password-toggle:hover {
+  background: #e1f0ff;
+}
+
+.detail-actions {
+  justify-content: center;
+  padding-top: 0.35rem;
 }
 
 .admin-layout {
