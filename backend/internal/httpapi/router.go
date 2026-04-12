@@ -127,6 +127,8 @@ func NewRouter(deps RouterDeps) *gin.Engine {
 	admin.PATCH("/announcements/:id", api.updateAnnouncement)
 	admin.DELETE("/announcements/:id", api.deleteAnnouncement)
 
+	api.registerFrontend(router)
+
 	return router
 }
 

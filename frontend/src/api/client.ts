@@ -1,6 +1,23 @@
 import type { Announcement, APIError, DirectoryPassword, FileEntry, PublicAnnouncement, User } from "../types";
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
+const SAME_ORIGIN_API_BASE = "__PANSHOW_SAME_ORIGIN__";
+const LOOPBACK_API_BASE = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?\/?$/i;
+
+function normalizeAPIBase(value: unknown): string {
+  if (typeof value !== "string") {
+    return "";
+  }
+  const apiBase = value.trim();
+  if (apiBase === "" || apiBase === SAME_ORIGIN_API_BASE) {
+    return "";
+  }
+  if (import.meta.env.PROD && LOOPBACK_API_BASE.test(apiBase)) {
+    return "";
+  }
+  return apiBase.replace(/\/+$/, "");
+}
+
+const API_BASE = normalizeAPIBase(import.meta.env.VITE_API_BASE_URL);
 const AUTH_TOKEN_KEY = "panshow_auth_token";
 const ACCESS_TOKEN_KEY = "panshow_access_token";
 const ACCESS_TOKEN_HEADER = "X-PanShow-Access-Token";

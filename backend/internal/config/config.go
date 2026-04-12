@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -12,6 +13,10 @@ import (
 type Config struct {
 	HTTPAddr       string
 	GinMode        string
+	LogDir         string
+	LogMaxSizeMB   int
+	LogMaxBackups  int
+	LogMaxAgeDays  int
 	DatabaseURL    string
 	RedisAddr      string
 	RedisPassword  string
@@ -37,6 +42,10 @@ func Load() Config {
 	return Config{
 		HTTPAddr:       env("PANSHOW_HTTP_ADDR", ":5245"),
 		GinMode:        env("PANSHOW_GIN_MODE", "release"),
+		LogDir:         resolveAppPath(env("PANSHOW_LOG_DIR", "logs")),
+		LogMaxSizeMB:   envInt("PANSHOW_LOG_MAX_SIZE_MB", 50),
+		LogMaxBackups:  envInt("PANSHOW_LOG_MAX_BACKUPS", 14),
+		LogMaxAgeDays:  envInt("PANSHOW_LOG_MAX_AGE_DAYS", 30),
 		DatabaseURL:    env("PANSHOW_DATABASE_URL", ""),
 		RedisAddr:      env("PANSHOW_REDIS_ADDR", "127.0.0.1:6379"),
 		RedisPassword:  env("PANSHOW_REDIS_PASSWORD", ""),
@@ -58,8 +67,73 @@ func Load() Config {
 }
 
 func loadDotenv() {
-	_ = godotenv.Load(".env")
-	_ = godotenv.Load("backend/.env")
+	for _, path := range dotenvPaths() {
+		_ = godotenv.Load(path)
+	}
+}
+
+func dotenvPaths() []string {
+	paths := make([]string, 0, 6)
+	if executable, err := os.Executable(); err == nil {
+		executableDir := filepath.Dir(executable)
+		paths = append(paths,
+			filepath.Join(executableDir, ".env"),
+			filepath.Join(executableDir, "config", ".env"),
+		)
+	}
+
+	paths = append(paths,
+		".env",
+		filepath.Join("config", ".env"),
+		filepath.Join("backend", ".env"),
+	)
+	return uniquePaths(paths)
+}
+
+func uniquePaths(paths []string) []string {
+	seen := make(map[string]struct{}, len(paths))
+	unique := make([]string, 0, len(paths))
+	for _, path := range paths {
+		key := filepath.Clean(path)
+		if absolute, err := filepath.Abs(path); err == nil {
+			key = filepath.Clean(absolute)
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		unique = append(unique, path)
+	}
+	return unique
+}
+
+func resolveAppPath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	if filepath.IsAbs(path) {
+		return filepath.Clean(path)
+	}
+	return filepath.Join(appDir(), path)
+}
+
+func appDir() string {
+	if executable, err := os.Executable(); err == nil {
+		executableDir := filepath.Dir(executable)
+		if tempDir := os.TempDir(); tempDir != "" {
+			if rel, err := filepath.Rel(tempDir, executableDir); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+				if cwd, err := os.Getwd(); err == nil {
+					return cwd
+				}
+			}
+		}
+		return executableDir
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		return cwd
+	}
+	return "."
 }
 
 func env(key, fallback string) string {

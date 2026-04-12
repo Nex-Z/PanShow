@@ -1,0 +1,2 @@
+This placeholder keeps the embedded dist directory present for Go builds.
+For production, build the frontend and copy frontend/dist/* into this directory before compiling the backend.

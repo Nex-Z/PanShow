@@ -11,3 +11,9 @@ docs/
 *.log
 .env
 .env.local
+
+backend/internal/web/dist/*
+!backend/internal/web/dist/placeholder.txt
+release/
+logs/
+backend/logs/

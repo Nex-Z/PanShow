@@ -24,6 +24,14 @@ func main() {
 	ctx := context.Background()
 	cfg := config.Load()
 
+	logCloser, err := setupLogging(cfg)
+	if err != nil {
+		log.Fatalf("setup logging: %v", err)
+	}
+	if logCloser != nil {
+		defer logCloser.Close()
+	}
+
 	db, err := gorm.Open(postgres.Open(cfg.DatabaseURL), &gorm.Config{})
 	if err != nil {
 		log.Fatalf("connect database: %v", err)
