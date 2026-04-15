@@ -11,58 +11,76 @@ import (
 )
 
 type Config struct {
-	HTTPAddr       string
-	GinMode        string
-	LogDir         string
-	LogMaxSizeMB   int
-	LogMaxBackups  int
-	LogMaxAgeDays  int
-	DatabaseURL    string
-	RedisAddr      string
-	RedisPassword  string
-	RedisDB        int
-	SessionTTL     time.Duration
-	CookieSecure   bool
-	CookieSameSite string
-	CORSOrigins    []string
-	R2Endpoint     string
-	R2AccessKey    string
-	R2SecretKey    string
-	R2Bucket       string
-	R2Region       string
-	R2RootPrefix   string
-	R2CacheTTL     time.Duration
-	AdminUsername  string
-	AdminPassword  string
+	HTTPAddr                  string
+	GinMode                   string
+	LogDir                    string
+	LogMaxSizeMB              int
+	LogMaxBackups             int
+	LogMaxAgeDays             int
+	DatabaseURL               string
+	RedisAddr                 string
+	RedisPassword             string
+	RedisDB                   int
+	SessionTTL                time.Duration
+	CookieSecure              bool
+	CookieSameSite            string
+	CORSOrigins               []string
+	R2Endpoint                string
+	R2AccessKey               string
+	R2SecretKey               string
+	R2Bucket                  string
+	R2Region                  string
+	R2RootPrefix              string
+	R2PublicBaseURL           string
+	R2CacheTTL                time.Duration
+	R2StaleCacheTTL           time.Duration
+	R2RequestTimeout          time.Duration
+	R2MaxAttempts             int
+	IndexEnabled              bool
+	IndexTimezone             string
+	IndexTodayRefreshInterval time.Duration
+	IndexRefreshOnStart       bool
+	IndexBackfillConcurrency  int
+	AdminUsername             string
+	AdminPassword             string
 }
 
 func Load() Config {
 	loadDotenv()
 
 	return Config{
-		HTTPAddr:       env("PANSHOW_HTTP_ADDR", ":5245"),
-		GinMode:        env("PANSHOW_GIN_MODE", "release"),
-		LogDir:         resolveAppPath(env("PANSHOW_LOG_DIR", "logs")),
-		LogMaxSizeMB:   envInt("PANSHOW_LOG_MAX_SIZE_MB", 50),
-		LogMaxBackups:  envInt("PANSHOW_LOG_MAX_BACKUPS", 14),
-		LogMaxAgeDays:  envInt("PANSHOW_LOG_MAX_AGE_DAYS", 30),
-		DatabaseURL:    env("PANSHOW_DATABASE_URL", ""),
-		RedisAddr:      env("PANSHOW_REDIS_ADDR", "127.0.0.1:6379"),
-		RedisPassword:  env("PANSHOW_REDIS_PASSWORD", ""),
-		RedisDB:        envInt("PANSHOW_REDIS_DB", 0),
-		SessionTTL:     time.Duration(envInt("PANSHOW_SESSION_TTL_HOURS", 24)) * time.Hour,
-		CookieSecure:   envBool("PANSHOW_COOKIE_SECURE", false),
-		CookieSameSite: env("PANSHOW_COOKIE_SAME_SITE", "lax"),
-		CORSOrigins:    envList("PANSHOW_CORS_ORIGINS", []string{"http://localhost:5173", "http://127.0.0.1:5173"}),
-		R2Endpoint:     env("PANSHOW_R2_ENDPOINT", ""),
-		R2AccessKey:    env("PANSHOW_R2_ACCESS_KEY", ""),
-		R2SecretKey:    env("PANSHOW_R2_SECRET_KEY", ""),
-		R2Bucket:       env("PANSHOW_R2_BUCKET", ""),
-		R2Region:       env("PANSHOW_R2_REGION", "auto"),
-		R2RootPrefix:   env("PANSHOW_R2_ROOT_PREFIX", ""),
-		R2CacheTTL:     time.Duration(envInt("PANSHOW_R2_CACHE_TTL_SECONDS", 60*30)) * time.Second,
-		AdminUsername:  env("PANSHOW_ADMIN_USERNAME", ""),
-		AdminPassword:  env("PANSHOW_ADMIN_PASSWORD", ""),
+		HTTPAddr:                  env("PANSHOW_HTTP_ADDR", ":5245"),
+		GinMode:                   env("PANSHOW_GIN_MODE", "release"),
+		LogDir:                    resolveAppPath(env("PANSHOW_LOG_DIR", "logs")),
+		LogMaxSizeMB:              envInt("PANSHOW_LOG_MAX_SIZE_MB", 50),
+		LogMaxBackups:             envInt("PANSHOW_LOG_MAX_BACKUPS", 14),
+		LogMaxAgeDays:             envInt("PANSHOW_LOG_MAX_AGE_DAYS", 30),
+		DatabaseURL:               env("PANSHOW_DATABASE_URL", ""),
+		RedisAddr:                 env("PANSHOW_REDIS_ADDR", "127.0.0.1:6379"),
+		RedisPassword:             env("PANSHOW_REDIS_PASSWORD", ""),
+		RedisDB:                   envInt("PANSHOW_REDIS_DB", 0),
+		SessionTTL:                time.Duration(envInt("PANSHOW_SESSION_TTL_HOURS", 24)) * time.Hour,
+		CookieSecure:              envBool("PANSHOW_COOKIE_SECURE", false),
+		CookieSameSite:            env("PANSHOW_COOKIE_SAME_SITE", "lax"),
+		CORSOrigins:               envList("PANSHOW_CORS_ORIGINS", []string{"http://localhost:5173", "http://127.0.0.1:5173"}),
+		R2Endpoint:                env("PANSHOW_R2_ENDPOINT", ""),
+		R2AccessKey:               env("PANSHOW_R2_ACCESS_KEY", ""),
+		R2SecretKey:               env("PANSHOW_R2_SECRET_KEY", ""),
+		R2Bucket:                  env("PANSHOW_R2_BUCKET", ""),
+		R2Region:                  env("PANSHOW_R2_REGION", "auto"),
+		R2RootPrefix:              env("PANSHOW_R2_ROOT_PREFIX", ""),
+		R2PublicBaseURL:           env("PANSHOW_R2_PUBLIC_BASE_URL", ""),
+		R2CacheTTL:                time.Duration(envInt("PANSHOW_R2_CACHE_TTL_SECONDS", 60*30)) * time.Second,
+		R2StaleCacheTTL:           time.Duration(envInt("PANSHOW_R2_STALE_CACHE_TTL_SECONDS", 24*60*60)) * time.Second,
+		R2RequestTimeout:          time.Duration(envInt("PANSHOW_R2_REQUEST_TIMEOUT_SECONDS", 12)) * time.Second,
+		R2MaxAttempts:             envInt("PANSHOW_R2_MAX_ATTEMPTS", 2),
+		IndexEnabled:              envBool("PANSHOW_INDEX_ENABLED", false),
+		IndexTimezone:             env("PANSHOW_INDEX_TIMEZONE", "Asia/Shanghai"),
+		IndexTodayRefreshInterval: time.Duration(envInt("PANSHOW_INDEX_TODAY_REFRESH_SECONDS", 0)) * time.Second,
+		IndexRefreshOnStart:       envBool("PANSHOW_INDEX_REFRESH_ON_START", true),
+		IndexBackfillConcurrency:  envInt("PANSHOW_INDEX_BACKFILL_CONCURRENCY", 4),
+		AdminUsername:             env("PANSHOW_ADMIN_USERNAME", ""),
+		AdminPassword:             env("PANSHOW_ADMIN_PASSWORD", ""),
 	}
 }
 

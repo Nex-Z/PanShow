@@ -36,7 +36,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("connect database: %v", err)
 	}
-	if err := db.AutoMigrate(&model.User{}, &model.DirectoryPassword{}, &model.Announcement{}, &model.SiteConfig{}); err != nil {
+	if err := db.AutoMigrate(&model.User{}, &model.DirectoryPassword{}, &model.Announcement{}, &model.SiteConfig{}, &model.FileIndexEntry{}, &model.FileIndexDir{}); err != nil {
 		log.Fatalf("migrate database: %v", err)
 	}
 	if err := ensureInitialAdmin(db, cfg); err != nil {

@@ -16,6 +16,7 @@ export type FileEntry = {
   size: number;
   lastModified?: string;
   contentType?: string;
+  metadataUnavailable?: boolean;
 };
 
 export type DirectoryPassword = {

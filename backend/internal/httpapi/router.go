@@ -3,9 +3,11 @@ package httpapi
 import (
 	"context"
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"panshow/backend/internal/config"
@@ -41,6 +43,10 @@ type API struct {
 	storage     *storage.Client
 	r2Cache     *responseCache
 	accessIndex *directoryAccessIndex
+	fileIndex   *fileIndexStore
+	backfill    *fileIndexBackfillRunner
+	indexLocks  map[string]*sync.Mutex
+	indexLocksM sync.Mutex
 }
 
 type filesResponse struct {
@@ -81,6 +87,9 @@ func NewRouter(deps RouterDeps) *gin.Engine {
 		storage:     deps.Storage,
 		r2Cache:     newResponseCache(),
 		accessIndex: newDirectoryAccessIndex(deps.DB, directoryAccessIndexTTL),
+		fileIndex:   newFileIndexStore(deps.DB),
+		backfill:    newFileIndexBackfillRunner(),
+		indexLocks:  make(map[string]*sync.Mutex),
 	}
 
 	router := gin.New()
@@ -126,8 +135,12 @@ func NewRouter(deps RouterDeps) *gin.Engine {
 	admin.POST("/announcements/cache/refresh", api.refreshAnnouncementCache)
 	admin.PATCH("/announcements/:id", api.updateAnnouncement)
 	admin.DELETE("/announcements/:id", api.deleteAnnouncement)
+	admin.GET("/files/index/backfill", api.indexBackfillStatus)
+	admin.POST("/files/index/backfill", api.startIndexBackfill)
+	admin.DELETE("/files/index/backfill", api.cancelIndexBackfill)
 
 	api.registerFrontend(router)
+	api.startFileIndexRefresher()
 
 	return router
 }
@@ -218,6 +231,9 @@ func (api *API) listFiles(c *gin.Context) {
 	cacheKey := listCacheKey(dir)
 	var cached filesResponse
 	if api.cachedJSON(c, cacheKey, &cached) {
+		if api.indexEnabled() {
+			c.Header("X-PanShow-Index", "cache")
+		}
 		result := loadAnnouncements()
 		if result.err != nil {
 			writeError(c, http.StatusInternalServerError, "announcement_error", "读取公告失败")
@@ -227,8 +243,60 @@ func (api *API) listFiles(c *gin.Context) {
 		writeJSON(c, http.StatusOK, cached)
 		return
 	}
+	if api.indexEnabled() {
+		response, source, ok, err := api.indexedFilesResponse(c.Request.Context(), dir)
+		if err != nil {
+			logRequestError(c, "read file index", err, "dir", dir)
+			writeError(c, http.StatusInternalServerError, "index_error", "读取目录索引失败")
+			return
+		}
+		if ok {
+			api.storeCachedJSONContext(c.Request.Context(), cacheKey, response)
+			c.Header("X-PanShow-Index", source)
+			result := loadAnnouncements()
+			if result.err != nil {
+				writeError(c, http.StatusInternalServerError, "announcement_error", "读取公告失败")
+				return
+			}
+			response.Announcements = result.announcements
+			writeJSON(c, http.StatusOK, response)
+			return
+		}
+		var stale filesResponse
+		if api.staleCachedJSON(c, cacheKey, &stale) {
+			c.Header("X-PanShow-Index", "stale")
+			result := loadAnnouncements()
+			if result.err != nil {
+				writeError(c, http.StatusInternalServerError, "announcement_error", "读取公告失败")
+				return
+			}
+			stale.Announcements = result.announcements
+			writeJSON(c, http.StatusOK, stale)
+			return
+		}
+		c.Header("X-PanShow-Index", "miss")
+		result := loadAnnouncements()
+		if result.err != nil {
+			writeError(c, http.StatusInternalServerError, "announcement_error", "读取公告失败")
+			return
+		}
+		writeJSON(c, http.StatusOK, filesResponse{Path: dir, Entries: []storage.FileEntry{}, Announcements: result.announcements})
+		return
+	}
 	entries, err := api.storage.List(c.Request.Context(), dir)
 	if err != nil {
+		logRequestError(c, "list R2 files", err, "dir", dir)
+		var stale filesResponse
+		if api.staleCachedJSON(c, cacheKey, &stale) {
+			result := loadAnnouncements()
+			if result.err != nil {
+				logRequestError(c, "load announcements for stale file list", result.err, "dir", dir)
+			} else {
+				stale.Announcements = result.announcements
+			}
+			writeJSON(c, http.StatusOK, stale)
+			return
+		}
 		writeError(c, http.StatusBadGateway, "storage_error", "读取 R2 文件列表失败")
 		return
 	}
@@ -261,8 +329,56 @@ func (api *API) fileDetail(c *gin.Context) {
 		writeJSON(c, http.StatusOK, cached)
 		return
 	}
+	if api.indexEnabled() {
+		response, ok, err := api.indexedFileDetail(c.Request.Context(), filePath)
+		if err != nil {
+			logRequestError(c, "read file detail index", err, "path", filePath)
+			writeError(c, http.StatusInternalServerError, "index_error", "读取文件索引失败")
+			return
+		}
+		if ok {
+			api.storeCachedJSONContext(c.Request.Context(), cacheKey, response)
+			c.Header("X-PanShow-Index", "postgres")
+			writeJSON(c, http.StatusOK, response)
+			return
+		}
+		var stale fileDetailResponse
+		if api.staleCachedJSON(c, cacheKey, &stale) {
+			c.Header("X-PanShow-Index", "stale")
+			writeJSON(c, http.StatusOK, stale)
+			return
+		}
+		if api.storage.HasPublicBaseURL() {
+			c.Header("X-PanShow-Index", "miss")
+			c.Header("X-PanShow-File-Metadata", "unavailable")
+			writeJSON(c, http.StatusOK, fileDetailResponse{File: storage.FallbackFileEntry(filePath)})
+			return
+		}
+		writeError(c, http.StatusNotFound, "index_miss", "文件索引不存在")
+		return
+	}
+	if api.storage.HasPublicBaseURL() {
+		var stale fileDetailResponse
+		if api.staleCachedJSON(c, cacheKey, &stale) {
+			writeJSON(c, http.StatusOK, stale)
+			return
+		}
+		c.Header("X-PanShow-File-Metadata", "unavailable")
+		writeJSON(c, http.StatusOK, fileDetailResponse{File: storage.FallbackFileEntry(filePath)})
+		return
+	}
 	entry, err := api.storage.Stat(c.Request.Context(), filePath)
 	if err != nil {
+		logRequestError(c, "stat R2 file", err, "path", filePath)
+		var stale fileDetailResponse
+		if api.staleCachedJSON(c, cacheKey, &stale) {
+			writeJSON(c, http.StatusOK, stale)
+			return
+		}
+		if api.storage.HasPublicBaseURL() {
+			writeJSON(c, http.StatusOK, fileDetailResponse{File: storage.FallbackFileEntry(filePath)})
+			return
+		}
 		writeError(c, http.StatusBadGateway, "storage_error", "读取文件详情失败")
 		return
 	}
@@ -285,10 +401,11 @@ func (api *API) download(c *gin.Context) {
 	}
 	url, err := api.storage.PresignDownload(c.Request.Context(), filePath, 5*time.Minute)
 	if err != nil {
+		logRequestError(c, "presign R2 download", err, "path", filePath)
 		writeError(c, http.StatusBadGateway, "storage_error", "生成下载链接失败")
 		return
 	}
-	writeJSON(c, http.StatusOK, gin.H{"url": url, "expiresIn": 300})
+	writeJSON(c, http.StatusOK, gin.H{"url": url, "expiresIn": api.fileURLExpiresInSeconds()})
 }
 
 func (api *API) preview(c *gin.Context) {
@@ -305,10 +422,11 @@ func (api *API) preview(c *gin.Context) {
 	}
 	url, err := api.storage.PresignPreview(c.Request.Context(), filePath, 5*time.Minute)
 	if err != nil {
+		logRequestError(c, "presign R2 preview", err, "path", filePath)
 		writeError(c, http.StatusBadGateway, "storage_error", "生成预览链接失败")
 		return
 	}
-	writeJSON(c, http.StatusOK, gin.H{"url": url, "expiresIn": 300})
+	writeJSON(c, http.StatusOK, gin.H{"url": url, "expiresIn": api.fileURLExpiresInSeconds()})
 }
 
 func (api *API) refreshFileCache(c *gin.Context) {
@@ -324,6 +442,15 @@ func (api *API) refreshFileCache(c *gin.Context) {
 		return
 	}
 	if !api.ensureDirectoryAccess(c, normalized) {
+		return
+	}
+	if api.indexEnabled() {
+		indexed, entryCount, err := api.refreshDirectoryIndex(c.Request.Context(), normalized)
+		if err != nil {
+			writeError(c, http.StatusBadGateway, "storage_error", "刷新目录索引失败")
+			return
+		}
+		writeJSON(c, http.StatusOK, gin.H{"ok": true, "indexed": indexed, "entryCount": entryCount})
 		return
 	}
 	if err := api.session.DeleteCachePatterns(c.Request.Context(), cacheDeletePatterns(normalized)...); err != nil {
@@ -1143,13 +1270,23 @@ func (api *API) cachedJSON(c *gin.Context, key string, dest any) bool {
 	return false
 }
 
+func (api *API) staleCachedJSON(c *gin.Context, key string, dest any) bool {
+	if api.r2Cache.GetStaleJSON(key, dest) {
+		c.Header("X-PanShow-Cache", "stale")
+		return true
+	}
+	return false
+}
+
 func (api *API) cachedJSONFromContext(ctx context.Context, key string, dest any) (string, bool) {
 	if api.r2Cache.GetJSON(key, dest) {
 		return "local", true
 	}
 	if ok, err := api.session.GetJSON(ctx, key, dest); err == nil && ok {
-		api.r2Cache.SetJSON(key, dest, api.cfg.R2CacheTTL)
+		api.r2Cache.SetJSON(key, dest, api.cfg.R2CacheTTL, api.cfg.R2StaleCacheTTL)
 		return "redis", true
+	} else if err != nil {
+		log.Printf("cache get failed key=%q: %v", key, err)
 	}
 	return "", false
 }
@@ -1160,8 +1297,42 @@ func (api *API) storeCachedJSON(c *gin.Context, key string, value any) {
 }
 
 func (api *API) storeCachedJSONContext(ctx context.Context, key string, value any) {
-	api.r2Cache.SetJSON(key, value, api.cfg.R2CacheTTL)
-	_ = api.session.SetJSON(ctx, key, value, api.cfg.R2CacheTTL)
+	api.r2Cache.SetJSON(key, value, api.cfg.R2CacheTTL, api.cfg.R2StaleCacheTTL)
+	if err := api.session.SetJSON(ctx, key, value, api.cfg.R2CacheTTL); err != nil {
+		log.Printf("cache set failed key=%q: %v", key, err)
+	}
+}
+
+func (api *API) fileURLExpiresInSeconds() int {
+	if api.storage.HasPublicBaseURL() {
+		return 0
+	}
+	return 300
+}
+
+func logRequestError(c *gin.Context, operation string, err error, fields ...string) {
+	var extra strings.Builder
+	for i := 0; i+1 < len(fields); i += 2 {
+		extra.WriteByte(' ')
+		extra.WriteString(fields[i])
+		extra.WriteByte('=')
+		extra.WriteString(strconv.Quote(fields[i+1]))
+	}
+
+	route := c.FullPath()
+	uri := ""
+	method := ""
+	if c.Request != nil {
+		method = c.Request.Method
+		if c.Request.URL != nil {
+			uri = c.Request.URL.RequestURI()
+			if route == "" {
+				route = c.Request.URL.Path
+			}
+		}
+	}
+	log.Printf("request error operation=%q method=%s route=%s uri=%q client=%s%s err=%v",
+		operation, method, route, uri, c.ClientIP(), extra.String(), err)
 }
 
 func isNotFound(err error) bool {

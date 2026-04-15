@@ -356,11 +356,11 @@ function FileDetail({ file, onDownload, onPreview }: { file: FileEntry; onDownlo
       <dl className="config-list">
         <div>
           <dt>大小</dt>
-          <dd>{formatSize(file.size)}</dd>
+          <dd>{file.metadataUnavailable ? "未知" : formatSize(file.size)}</dd>
         </div>
         <div>
           <dt>更新时间</dt>
-          <dd>{file.lastModified ? new Date(file.lastModified).toLocaleString() : "未知"}</dd>
+          <dd>{file.metadataUnavailable ? "未知" : file.lastModified ? new Date(file.lastModified).toLocaleString() : "未知"}</dd>
         </div>
       </dl>
       <div className="detail-actions">

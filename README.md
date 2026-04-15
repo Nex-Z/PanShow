@@ -142,7 +142,16 @@ PANSHOW_R2_SECRET_KEY=<secret-key>
 PANSHOW_R2_BUCKET=<bucket>
 PANSHOW_R2_REGION=auto
 PANSHOW_R2_ROOT_PREFIX=
+PANSHOW_R2_PUBLIC_BASE_URL=https://assets.example.com
 PANSHOW_R2_CACHE_TTL_SECONDS=1800
+PANSHOW_R2_STALE_CACHE_TTL_SECONDS=86400
+PANSHOW_R2_REQUEST_TIMEOUT_SECONDS=12
+PANSHOW_R2_MAX_ATTEMPTS=2
+PANSHOW_INDEX_ENABLED=true
+PANSHOW_INDEX_TIMEZONE=Asia/Shanghai
+PANSHOW_INDEX_TODAY_REFRESH_SECONDS=3600
+PANSHOW_INDEX_REFRESH_ON_START=true
+PANSHOW_INDEX_BACKFILL_CONCURRENCY=4
 PANSHOW_ADMIN_USERNAME=admin
 PANSHOW_ADMIN_PASSWORD=<initial-admin-password>
 ```
@@ -159,8 +168,36 @@ PANSHOW_ADMIN_PASSWORD=<initial-admin-password>
 - `PANSHOW_COOKIE_SAME_SITE`：同站部署用 `lax`；如果前端和 API 是跨站域名并依赖 cookie，则使用 `none`，同时必须启用 HTTPS 和 `PANSHOW_COOKIE_SECURE=true`。
 - `PANSHOW_CORS_ORIGINS`：允许访问 API 的前端 origin，多个值用英文逗号分隔。单进程同域部署时仍建议填正式站点 origin。
 - `PANSHOW_R2_ROOT_PREFIX`：可选，用于把站点根目录限制在 R2 bucket 的某个前缀下。
+- `PANSHOW_R2_PUBLIC_BASE_URL`：可选，R2 bucket 绑定的公开自定义域名，例如 `https://assets.example.com`。配置后下载和预览接口会返回该域名下的对象直链；文件详情在没有缓存时会跳过 R2 `HeadObject` 并直接返回路径信息，减少直链文件页对 R2 API 的依赖。目录列表和健康检查仍使用 `PANSHOW_R2_ENDPOINT`。如果配置了 `PANSHOW_R2_ROOT_PREFIX`，生成的直链也会自动带上该前缀。
+- `PANSHOW_R2_CACHE_TTL_SECONDS`：R2 文件列表和详情的正常缓存时间；过期后会重新请求 R2。
+- `PANSHOW_R2_STALE_CACHE_TTL_SECONDS`：本地 stale 缓存保留时间。R2 临时失败时会优先返回旧缓存并在响应头标记 `X-PanShow-Cache: stale`。
+- `PANSHOW_R2_REQUEST_TIMEOUT_SECONDS` / `PANSHOW_R2_MAX_ATTEMPTS`：单次 R2 操作的总超时和 SDK 最大尝试次数，避免请求拖到上游反代超时才结束。
+- `PANSHOW_INDEX_ENABLED`：启用日期目录索引。启用后用户请求目录列表优先读 Redis/Postgres 索引，不再同步调用 R2 `ListObjectsV2`。
+- `PANSHOW_INDEX_TIMEZONE`：用于计算“今天目录”的时区，默认 `Asia/Shanghai`。
+- `PANSHOW_INDEX_TODAY_REFRESH_SECONDS`：后台刷新今天 `/YYYY/MM/DD` 目录的间隔，默认 3600 秒。
+- `PANSHOW_INDEX_REFRESH_ON_START`：服务启动后是否立即尝试刷新今天目录。今天目录为空时不会创建索引。
+- `PANSHOW_INDEX_BACKFILL_CONCURRENCY`：管理员手动触发历史日期索引回填时，同时刷新日期目录的数量，默认 4，最大 8。
 - `PANSHOW_ADMIN_USERNAME` / `PANSHOW_ADMIN_PASSWORD`：仅在数据库里没有管理员时创建首个管理员；创建后应改用后台管理账号，不要把真实密码写进发布包。
 - `VITE_API_BASE_URL`：前端构建期变量。单进程同域部署保持同域默认值即可；一键构建脚本默认会强制同域 `/api/*`，不会使用 `frontend/.env` 里的 `127.0.0.1`。如果前端和 API 分开部署，构建时通过 `-ApiBaseUrl https://api.example.com` 设置，并同步配置 `PANSHOW_CORS_ORIGINS`。
+
+### 历史索引回填
+
+启用 `PANSHOW_INDEX_ENABLED=true` 后，可以用管理员接口异步补齐历史日期目录索引。默认请求会从 `2025-01-01` 逐日扫到按 `PANSHOW_INDEX_TIMEZONE` 计算的今天，并按 `PANSHOW_INDEX_BACKFILL_CONCURRENCY` 并发刷新日期目录；已经有索引的日期默认跳过，空目录不会写入索引记录。
+
+```bash
+curl -X POST http://127.0.0.1:5245/api/admin/files/index/backfill \
+  -H "Authorization: Bearer <admin-token>" \
+  -H "Content-Type: application/json" \
+  -d '{"from":"2025-01-01","to":"today","concurrency":4,"skipIndexed":true}'
+
+curl http://127.0.0.1:5245/api/admin/files/index/backfill \
+  -H "Authorization: Bearer <admin-token>"
+
+curl -X DELETE http://127.0.0.1:5245/api/admin/files/index/backfill \
+  -H "Authorization: Bearer <admin-token>"
+```
+
+可选参数：`from` / `to` 支持 `YYYY-MM-DD` 或 `/YYYY/MM/DD`；`concurrency` 可临时覆盖并发数，最大 8；`limitDays` 可先试跑少量日期；`skipIndexed=false` 可强制重刷已有索引。
 
 ## 部署
 

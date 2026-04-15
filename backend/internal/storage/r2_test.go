@@ -22,3 +22,29 @@ func TestDownloadContentDispositionSupportsUTF8Filename(t *testing.T) {
 		t.Fatalf("disposition = %q, want UTF-8 encoded filename", got)
 	}
 }
+
+func TestPublicObjectURLUsesCustomDomainAndRootPrefix(t *testing.T) {
+	publicBaseURL, err := parsePublicBaseURL("https://assets.example.com/media/")
+	if err != nil {
+		t.Fatalf("parse public base URL: %v", err)
+	}
+	client := &Client{
+		rootPrefix:    "private-root",
+		publicBaseURL: publicBaseURL,
+	}
+
+	got, ok := client.publicObjectURL("/docs/report final.pdf")
+	if !ok {
+		t.Fatal("public object URL was not available")
+	}
+	want := "https://assets.example.com/media/private-root/docs/report%20final.pdf"
+	if got != want {
+		t.Fatalf("public URL = %q, want %q", got, want)
+	}
+}
+
+func TestParsePublicBaseURLRejectsMissingHost(t *testing.T) {
+	if _, err := parsePublicBaseURL("https:///assets"); err == nil {
+		t.Fatal("parse public base URL succeeded without a host")
+	}
+}

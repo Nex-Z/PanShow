@@ -17,9 +17,10 @@ type responseCache struct {
 }
 
 type responseCacheItem struct {
-	createdAt time.Time
-	data      []byte
-	expiresAt time.Time
+	createdAt      time.Time
+	data           []byte
+	expiresAt      time.Time
+	staleExpiresAt time.Time
 }
 
 func newResponseCache() *responseCache {
@@ -27,26 +28,41 @@ func newResponseCache() *responseCache {
 }
 
 func (cache *responseCache) GetJSON(key string, dest any) bool {
+	return cache.getJSON(key, dest, false)
+}
+
+func (cache *responseCache) GetStaleJSON(key string, dest any) bool {
+	return cache.getJSON(key, dest, true)
+}
+
+func (cache *responseCache) getJSON(key string, dest any, allowStale bool) bool {
 	cache.mu.RLock()
 	item, ok := cache.items[key]
 	cache.mu.RUnlock()
 	if !ok {
 		return false
 	}
-	if time.Now().After(item.expiresAt) {
+	now := time.Now()
+	if now.After(item.staleExpiresAt) {
 		cache.mu.Lock()
-		if current, ok := cache.items[key]; ok && current.expiresAt.Equal(item.expiresAt) {
+		if current, ok := cache.items[key]; ok && current.staleExpiresAt.Equal(item.staleExpiresAt) {
 			cache.deleteLocked(key)
 		}
 		cache.mu.Unlock()
 		return false
 	}
+	if !allowStale && now.After(item.expiresAt) {
+		return false
+	}
 	return json.Unmarshal(item.data, dest) == nil
 }
 
-func (cache *responseCache) SetJSON(key string, value any, ttl time.Duration) {
+func (cache *responseCache) SetJSON(key string, value any, ttl, staleTTL time.Duration) {
 	if ttl <= 0 {
 		return
+	}
+	if staleTTL < 0 {
+		staleTTL = 0
 	}
 	data, err := json.Marshal(value)
 	if err != nil {
@@ -61,7 +77,7 @@ func (cache *responseCache) SetJSON(key string, value any, ttl time.Duration) {
 	now := time.Now()
 	cache.mu.Lock()
 	cache.deleteLocked(key)
-	cache.items[key] = responseCacheItem{createdAt: now, data: data, expiresAt: now.Add(ttl)}
+	cache.items[key] = responseCacheItem{createdAt: now, data: data, expiresAt: now.Add(ttl), staleExpiresAt: now.Add(ttl + staleTTL)}
 	cache.totalBytes += len(data)
 	cache.pruneLocked(now)
 	cache.mu.Unlock()
@@ -82,7 +98,7 @@ func (cache *responseCache) DeletePatterns(patterns ...string) {
 
 func (cache *responseCache) pruneLocked(now time.Time) {
 	for key, item := range cache.items {
-		if now.After(item.expiresAt) {
+		if now.After(item.staleExpiresAt) {
 			cache.deleteLocked(key)
 		}
 	}

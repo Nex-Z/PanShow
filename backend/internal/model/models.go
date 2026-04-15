@@ -44,3 +44,26 @@ type SiteConfig struct {
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
 }
+
+type FileIndexEntry struct {
+	Path                string     `gorm:"primaryKey;size:2048" json:"path"`
+	ParentPath          string     `gorm:"size:2048;not null;index:idx_file_index_parent,priority:1" json:"parentPath"`
+	Name                string     `gorm:"size:512;not null;index:idx_file_index_parent,priority:2" json:"name"`
+	IsDir               bool       `gorm:"not null;index:idx_file_index_parent,priority:3" json:"isDir"`
+	Size                int64      `gorm:"not null;default:0" json:"size"`
+	LastModified        *time.Time `json:"lastModified,omitempty"`
+	ContentType         string     `gorm:"size:255" json:"contentType,omitempty"`
+	MetadataUnavailable bool       `gorm:"not null;default:false" json:"metadataUnavailable,omitempty"`
+	IndexedAt           time.Time  `gorm:"not null;index" json:"indexedAt"`
+	CreatedAt           time.Time  `json:"createdAt"`
+	UpdatedAt           time.Time  `json:"updatedAt"`
+}
+
+type FileIndexDir struct {
+	Path       string    `gorm:"primaryKey;size:2048" json:"path"`
+	SyncedAt   time.Time `gorm:"not null;index" json:"syncedAt"`
+	EntryCount int       `gorm:"not null;default:0" json:"entryCount"`
+	LastError  string    `gorm:"type:text" json:"lastError,omitempty"`
+	CreatedAt  time.Time `json:"createdAt"`
+	UpdatedAt  time.Time `json:"updatedAt"`
+}
